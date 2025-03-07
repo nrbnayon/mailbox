@@ -1,0 +1,184 @@
+import React, { useState, useRef, useEffect } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import ChatMessage from "./ChatMessage";
+import ChatInput from "./ChatInput";
+import ModelSelector from "./ModelSelector";
+import { processWithAI, getEmails } from "@/lib/api";
+import { toast } from "react-hot-toast";
+import { Loader2 } from "lucide-react";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: Date;
+  loading?: boolean;
+}
+
+const ChatContainer: React.FC = () => {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [selectedModel, setSelectedModel] = useState("mixtral-8x7b-32768");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Fetch emails for context
+  const { data: emails, isLoading: emailsLoading } = useQuery({
+    queryKey: ["emails"],
+    queryFn: () => getEmails(),
+  });
+
+  const scrollToBottom = () => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const aiMutation = useMutation({
+    mutationFn: processWithAI,
+    onMutate: (variables) => {
+      // Show loading state
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: "assistant",
+          content: "Thinking...",
+          timestamp: new Date(),
+          loading: true,
+        },
+      ]);
+    },
+    onSuccess: (response, variables) => {
+      // Replace loading message with actual response
+      setMessages((prev) => {
+        const newMessages = [...prev];
+        const loadingIndex = newMessages.findIndex((msg) => msg.loading);
+        if (loadingIndex !== -1) {
+          newMessages[loadingIndex] = {
+            id: Date.now().toString(),
+            role: "assistant",
+            content: response.response,
+            timestamp: new Date(),
+          };
+        }
+        return newMessages;
+      });
+    },
+    onError: (error) => {
+      // Remove loading message and show error
+      setMessages((prev) => prev.filter((msg) => !msg.loading));
+      toast.error("Failed to process message");
+    },
+  });
+
+  const handleSendMessage = (content: string) => {
+    const userMessage = {
+      id: Date.now().toString(),
+      role: "user" as const,
+      content,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+
+    aiMutation.mutate({
+      content,
+      action: "process",
+      model: selectedModel,
+      context: {
+        emails: emails || [],
+        previousMessages: messages,
+      },
+    });
+  };
+
+  const handleCopy = (content: string) => {
+    navigator.clipboard.writeText(content);
+    toast.success("Copied to clipboard");
+  };
+
+  const handleRetry = (messageIndex: number) => {
+    const messageToRetry = messages[messageIndex];
+    if (messageToRetry.role === "user") {
+      aiMutation.mutate({
+        content: messageToRetry.content,
+        action: "process",
+        model: selectedModel,
+        context: {
+          emails: emails || [],
+          previousMessages: messages.slice(0, messageIndex),
+        },
+      });
+    }
+  };
+
+  if (emailsLoading) {
+    return (
+      <div className='h-full flex items-center justify-center'>
+        <div className='flex flex-col items-center gap-4'>
+          <Loader2 className='h-8 w-8 animate-spin' />
+          <p className='text-sm text-muted-foreground'>
+            Loading your emails...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className='flex flex-col h-full bg-background' ref={containerRef}>
+      <div className='flex-1 overflow-y-auto px-4 py-6 space-y-6'>
+        {messages.length === 0 ? (
+          <div className='h-full flex items-center justify-center text-center'>
+            <div className='max-w-md space-y-4'>
+              <h2 className='text-2xl font-bold'>
+                Welcome to AI Email Assistant
+              </h2>
+              <p className='text-muted-foreground'>
+                I can help you manage your emails, draft responses, find
+                specific messages, and more. Just ask me anything!
+              </p>
+              <div className='text-sm text-muted-foreground'>
+                Try asking:
+                <ul className='mt-2 space-y-2'>
+                  <li>"Show my unread emails"</li>
+                  <li>"Find emails from [sender]"</li>
+                  <li>"Draft a response to [subject]"</li>
+                  <li>"Summarize my recent emails"</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        ) : (
+          messages.map((message, index) => (
+            <ChatMessage
+              key={message.id}
+              message={message}
+              onCopy={() => handleCopy(message.content)}
+              onRetry={() => handleRetry(index)}
+            />
+          ))
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <div className='border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60'>
+        <div className='p-4 border-b'>
+          <ModelSelector
+            selectedModel={selectedModel}
+            onModelChange={setSelectedModel}
+          />
+        </div>
+        <ChatInput
+          onSend={handleSendMessage}
+          isLoading={aiMutation.isPending}
+        />
+      </div>
+    </div>
+  );
+};
+
+export default ChatContainer;
