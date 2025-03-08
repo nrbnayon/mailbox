@@ -1,9 +1,10 @@
-// backend\src\routes\auth.ts
 import express from "express";
 import { google } from "googleapis";
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
 import { auth, AuthRequest } from "../middleware/auth.js";
+import * as msal from "@azure/msal-node";
+import axios from "axios";
 
 const router = express.Router();
 
@@ -14,27 +15,64 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_REDIRECT_URI
 );
 
+// Microsoft OAuth configuration
+const msalConfig = {
+  auth: {
+    clientId: process.env.MICROSOFT_CLIENT_ID!,
+    clientSecret: process.env.MICROSOFT_CLIENT_SECRET!,
+    authority: "https://login.microsoftonline.com/common",
+  },
+};
+
+const msalClient = new msal.ConfidentialClientApplication(msalConfig);
+
+// Yahoo OAuth configuration
+const YAHOO_AUTH_URL = "https://api.login.yahoo.com/oauth2/request_auth";
+
 // Google OAuth login
 router.get("/google", (req, res) => {
+  const redirectUrl = req.query.redirect_url as string;
+  const scopes = ((req.query.scopes as string) || "").split(" ");
+
+  if (redirectUrl) {
+    res.cookie("frontend_redirect", redirectUrl, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+  }
+
+  const defaultScopes =
+    process.env.NODE_ENV === "development"
+      ? ["profile", "email"]
+      : ["profile", "email", "https://www.googleapis.com/auth/gmail.modify"];
+
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
-    scope: [
-      "https://www.googleapis.com/auth/userinfo.profile",
-      "https://www.googleapis.com/auth/userinfo.email",
-      "https://www.googleapis.com/auth/gmail.modify",
-    ],
+    scope: scopes.length > 0 ? scopes : defaultScopes,
+    prompt: "consent",
+    include_granted_scopes: true,
   });
+
   res.redirect(url);
 });
 
-// Google OAuth callback
+// Google OAuth callback route (missing in original code)
 router.get("/google/callback", async (req, res) => {
+  const { code } = req.query;
+  const frontendRedirect =
+    req.cookies.frontend_redirect || process.env.FRONTEND_URL;
+
   try {
-    const { code } = req.query;
     const { tokens } = await oauth2Client.getToken(code as string);
     oauth2Client.setCredentials(tokens);
 
-    const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
+    const oauth2 = google.oauth2({
+      auth: oauth2Client,
+      version: "v2",
+    });
+
     const { data } = await oauth2.userinfo.get();
 
     let user = await User.findOne({ googleId: data.id });
@@ -42,7 +80,6 @@ router.get("/google/callback", async (req, res) => {
       user = await User.create({
         email: data.email,
         name: data.name,
-        image: data.picture,
         provider: "gmail",
         googleId: data.id,
         googleAccessToken: tokens.access_token,
@@ -59,17 +96,190 @@ router.get("/google/callback", async (req, res) => {
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET!, {
       expiresIn: "7d",
     });
+
     res.cookie("token", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
+    res.redirect(frontendRedirect);
   } catch (error) {
-    console.error("Google auth error:", error);
-    res.redirect(`${process.env.FRONTEND_URL}/login?error=auth_failed`);
+    console.error("Google callback error:", error);
+    res.redirect(`${frontendRedirect}/login?error=google_auth_failed`);
+  }
+});
+
+// Microsoft OAuth login
+router.get("/microsoft", async (req, res) => {
+  const redirectUrl = req.query.redirect_url as string;
+
+  if (redirectUrl) {
+    res.cookie("frontend_redirect", redirectUrl, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+  }
+
+  const authCodeUrlParameters = {
+    scopes: ["user.read", "mail.read"],
+    redirectUri: process.env.MICROSOFT_REDIRECT_URI || "",
+  };
+
+  try {
+    const response = await msalClient.getAuthCodeUrl(authCodeUrlParameters);
+    res.redirect(response);
+  } catch (error) {
+    console.error("Microsoft auth error:", error);
+    res.redirect(`${redirectUrl}/login?error=microsoft_auth_failed`);
+  }
+});
+
+// Microsoft OAuth callback
+router.get("/microsoft/callback", async (req, res) => {
+  const { code } = req.query;
+  const frontendRedirect =
+    req.cookies.frontend_redirect || process.env.FRONTEND_URL;
+
+  try {
+    const tokenResponse = await msalClient.acquireTokenByCode({
+      code: code as string,
+      scopes: ["user.read", "mail.read"],
+      redirectUri: process.env.MICROSOFT_REDIRECT_URI || "",
+    });
+
+    // Get user info from Microsoft Graph API
+    const userResponse = await axios.get(
+      "https://graph.microsoft.com/v1.0/me",
+      {
+        headers: { Authorization: `Bearer ${tokenResponse.accessToken}` },
+      }
+    );
+
+    let user = await User.findOne({ microsoftId: userResponse.data.id });
+    if (!user) {
+      user = await User.create({
+        email: userResponse.data.mail || userResponse.data.userPrincipalName,
+        name: userResponse.data.displayName,
+        provider: "outlook",
+        microsoftId: userResponse.data.id,
+        microsoftAccessToken: tokenResponse.accessToken,
+      });
+    } else {
+      user.microsoftAccessToken = tokenResponse.accessToken;
+      await user.save();
+    }
+
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET!, {
+      expiresIn: "7d",
+    });
+
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.redirect(frontendRedirect);
+  } catch (error) {
+    console.error("Microsoft callback error:", error);
+    res.redirect(`${frontendRedirect}/login?error=microsoft_auth_failed`);
+  }
+});
+
+// Yahoo OAuth login
+router.get("/yahoo", (req, res) => {
+  const redirectUrl = req.query.redirect_url as string;
+
+  if (redirectUrl) {
+    res.cookie("frontend_redirect", redirectUrl, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+  }
+
+  const params = new URLSearchParams({
+    client_id: process.env.YAHOO_CLIENT_ID!,
+    redirect_uri: process.env.YAHOO_REDIRECT_URI!,
+    response_type: "code",
+    scope: "openid mail-r",
+  });
+
+  const authUrl = `${YAHOO_AUTH_URL}?${params.toString()}`;
+  res.redirect(authUrl);
+});
+
+// Yahoo OAuth callback
+router.get("/yahoo/callback", async (req, res) => {
+  const { code } = req.query;
+  const frontendRedirect =
+    req.cookies.frontend_redirect || process.env.FRONTEND_URL;
+
+  try {
+    // Exchange code for tokens
+    const tokenResponse = await axios.post(
+      "https://api.login.yahoo.com/oauth2/get_token",
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code as string,
+        redirect_uri: process.env.YAHOO_REDIRECT_URI!,
+        client_id: process.env.YAHOO_CLIENT_ID!,
+        client_secret: process.env.YAHOO_CLIENT_SECRET!,
+      }).toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    // Get user info
+    const userResponse = await axios.get(
+      "https://api.login.yahoo.com/openid/v1/userinfo",
+      {
+        headers: { Authorization: `Bearer ${tokenResponse.data.access_token}` },
+      }
+    );
+
+    let user = await User.findOne({ yahooId: userResponse.data.sub });
+    if (!user) {
+      user = await User.create({
+        email: userResponse.data.email,
+        name: userResponse.data.name,
+        provider: "yahoo",
+        yahooId: userResponse.data.sub,
+        yahooAccessToken: tokenResponse.data.access_token,
+        refreshToken: tokenResponse.data.refresh_token,
+      });
+    } else {
+      user.yahooAccessToken = tokenResponse.data.access_token;
+      if (tokenResponse.data.refresh_token) {
+        user.refreshToken = tokenResponse.data.refresh_token;
+      }
+      await user.save();
+    }
+
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET!, {
+      expiresIn: "7d",
+    });
+
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.redirect(frontendRedirect);
+  } catch (error) {
+    console.error("Yahoo callback error:", error);
+    res.redirect(`${frontendRedirect}/login?error=yahoo_auth_failed`);
   }
 });
 
@@ -77,10 +287,14 @@ router.get("/google/callback", async (req, res) => {
 router.get("/me", auth, async (req: AuthRequest, res) => {
   try {
     const user = await User.findById(req.user!.userId).select(
-      "-googleAccessToken -refreshToken"
+      "-googleAccessToken -microsoftAccessToken -yahooAccessToken -refreshToken"
     );
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
     res.json({ user });
   } catch (error) {
+    console.error("Error fetching user:", error);
     res.status(500).json({ error: "Server error" });
   }
 });

@@ -72,6 +72,7 @@ const ChatContainer: React.FC = () => {
       // Remove loading message and show error
       setMessages((prev) => prev.filter((msg) => !msg.loading));
       toast.error("Failed to process message");
+      console.error("AI processing error:", error);
     },
   });
 
@@ -117,10 +118,10 @@ const ChatContainer: React.FC = () => {
 
   if (emailsLoading) {
     return (
-      <div className='h-full flex items-center justify-center'>
-        <div className='flex flex-col items-center gap-4'>
-          <Loader2 className='h-8 w-8 animate-spin' />
-          <p className='text-sm text-muted-foreground'>
+      <div className="h-full flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="h-8 w-8 animate-spin" />
+          <p className="text-sm text-muted-foreground">
             Loading your emails...
           </p>
         </div>
@@ -129,21 +130,21 @@ const ChatContainer: React.FC = () => {
   }
 
   return (
-    <div className='flex flex-col h-full bg-background' ref={containerRef}>
-      <div className='flex-1 overflow-y-auto px-4 py-6 space-y-6'>
+    <div className="flex flex-col h-full bg-background" ref={containerRef}>
+      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
         {messages.length === 0 ? (
-          <div className='h-full flex items-center justify-center text-center'>
-            <div className='max-w-md space-y-4'>
-              <h2 className='text-2xl font-bold'>
+          <div className="h-full flex items-center justify-center text-center">
+            <div className="max-w-md space-y-4">
+              <h2 className="text-2xl font-bold">
                 Welcome to AI Email Assistant
               </h2>
-              <p className='text-muted-foreground'>
+              <p className="text-muted-foreground">
                 I can help you manage your emails, draft responses, find
                 specific messages, and more. Just ask me anything!
               </p>
-              <div className='text-sm text-muted-foreground'>
+              <div className="text-sm text-muted-foreground">
                 Try asking:
-                <ul className='mt-2 space-y-2'>
+                <ul className="mt-2 space-y-2">
                   <li>"Show my unread emails"</li>
                   <li>"Find emails from [sender]"</li>
                   <li>"Draft a response to [subject]"</li>
@@ -165,8 +166,8 @@ const ChatContainer: React.FC = () => {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className='border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60'>
-        <div className='p-4 border-b'>
+      <div className="border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+        <div className="p-4 border-b">
           <ModelSelector
             selectedModel={selectedModel}
             onModelChange={setSelectedModel}
@@ -175,6 +176,7 @@ const ChatContainer: React.FC = () => {
         <ChatInput
           onSend={handleSendMessage}
           isLoading={aiMutation.isPending}
+          selectedModel={selectedModel}
         />
       </div>
     </div>

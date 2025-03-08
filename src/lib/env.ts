@@ -1,4 +1,4 @@
-// src\lib\env.ts
+// frontend .env
 export const env = {
   apiUrl: import.meta.env.VITE_API_URL,
   googleClientId: import.meta.env.VITE_GOOGLE_CLIENT_ID,
@@ -6,10 +6,18 @@ export const env = {
 } as const;
 
 // Type checking for required environment variables
-const requiredEnvVars = ['VITE_API_URL', 'VITE_GOOGLE_CLIENT_ID', 'VITE_MICROSOFT_CLIENT_ID'];
+const requiredEnvVars = [
+  "VITE_API_URL",
+  "VITE_GOOGLE_CLIENT_ID",
+  "VITE_MICROSOFT_CLIENT_ID",
+];
 
-requiredEnvVars.forEach(envVar => {
+// Check for missing environment variables
+for (const envVar of requiredEnvVars) {
   if (!import.meta.env[envVar]) {
-    throw new Error(`Missing required environment variable: ${envVar}`);
+    console.error(`Missing required environment variable: ${envVar}`);
   }
-});
+}
+
+// Log for debugging
+console.log("API URL:", env.apiUrl);

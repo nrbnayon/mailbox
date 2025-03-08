@@ -16,9 +16,12 @@ const envSchema = z.object({
   MICROSOFT_CLIENT_ID: z.string(),
   MICROSOFT_CLIENT_SECRET: z.string(),
   MICROSOFT_REDIRECT_URI: z.string().url(),
+  YAHOO_CLIENT_ID: z.string(),
+  YAHOO_CLIENT_SECRET: z.string(),
+  YAHOO_REDIRECT_URI: z.string().url(),
   GROQ_API_KEY: z.string(),
   DEEPSEEK_API_KEY: z.string(),
-  NODE_ENV: z.enum(["development", "production"]),
+  NODE_ENV: z.enum(["development", "production"]).optional(),
 });
 
 const env = envSchema.parse(process.env);

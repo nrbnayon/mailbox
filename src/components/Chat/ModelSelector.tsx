@@ -1,46 +1,18 @@
-import React from "react";
-import { Check, ChevronDown } from "lucide-react";
-import * as Select from "@radix-ui/react-select";
+// src\components\Chat\ModelSelector.tsx
+import React, { useEffect, useState, useRef } from "react";
+import { Check, ChevronDown, Loader2, AlertCircle } from "lucide-react";
+import { getModels, getDefaultModel } from "@/lib/api";
 
-interface Model {
+export interface AIModel {
   id: string;
   name: string;
   developer: string;
   contextWindow: number;
+  maxCompletionTokens?: number;
+  description?: string;
+  isDefault?: boolean;
+  apiType?: string;
 }
-
-const models: Model[] = [
-  {
-    id: "mixtral-8x7b-32768",
-    name: "Mixtral-8x7b-32768",
-    developer: "Mistral",
-    contextWindow: 32768,
-  },
-  {
-    id: "llama-3-70b",
-    name: "Llama 3 70B",
-    developer: "Meta",
-    contextWindow: 128000,
-  },
-  {
-    id: "gemma-7b",
-    name: "Gemma 7B",
-    developer: "Google",
-    contextWindow: 8192,
-  },
-  {
-    id: "deepseek-coder",
-    name: "DeepSeek Coder",
-    developer: "DeepSeek",
-    contextWindow: 32768,
-  },
-  {
-    id: "deepseek-llm",
-    name: "DeepSeek LLM",
-    developer: "DeepSeek",
-    contextWindow: 32768,
-  },
-];
 
 interface ModelSelectorProps {
   selectedModel: string;
@@ -51,52 +23,156 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   selectedModel,
   onModelChange,
 }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [models, setModels] = useState<AIModel[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Fetch models from the API
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        setIsLoading(true);
+        const modelsList = await getModels();
+        setModels(modelsList);
+
+        // If no model is selected, fetch and set the default model
+        if (!selectedModel && modelsList.length > 0) {
+          try {
+            const defaultModel = await getDefaultModel();
+            onModelChange(defaultModel.id);
+          } catch (defaultError) {
+            // If default model fetch fails, use the first model in the list
+            console.error("Error fetching default model:", defaultError);
+            onModelChange(modelsList[0].id);
+          }
+        }
+
+        setError(null);
+      } catch (err) {
+        console.error("Error fetching models:", err);
+        setError("Failed to load models");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchModels();
+  }, [onModelChange]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(event.target as Node) &&
+        isOpen
+      ) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isOpen]);
+
+  // Find the currently selected model data
   const selectedModelData = models.find((m) => m.id === selectedModel);
 
+  // Render loading state
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 text-sm rounded-md border bg-background">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span>Loading models...</span>
+      </div>
+    );
+  }
+
+  // Render error state
+  if (error) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 text-sm rounded-md border bg-background text-red-500">
+        <AlertCircle className="h-4 w-4" />
+        <span>{error}</span>
+      </div>
+    );
+  }
+
+  // If models array is empty after loading
+  if (models.length === 0) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 text-sm rounded-md border bg-background text-amber-500">
+        <AlertCircle className="h-4 w-4" />
+        <span>No models available</span>
+      </div>
+    );
+  }
+
   return (
-    <Select.Root value={selectedModel} onValueChange={onModelChange}>
-      <Select.Trigger className='inline-flex items-center gap-2 px-3 py-2 text-sm rounded-md border bg-background hover:bg-accent'>
-        <Select.Value>
-          Using {selectedModelData?.name} ({selectedModelData?.developer})
-        </Select.Value>
-        <Select.Icon>
-          <ChevronDown className='h-4 w-4' />
-        </Select.Icon>
-      </Select.Trigger>
+    <div className="relative" ref={dropdownRef}>
+      <button
+        onClick={() => setIsOpen((prev) => !prev)}
+        className="flex items-center justify-between w-full px-3 py-2 text-sm border rounded-md bg-background hover:bg-accent/10 transition-colors"
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        aria-labelledby="model-selector"
+      >
+        <div className="flex items-center gap-2">
+          {selectedModelData ? (
+            <>
+              <span className="font-medium">{selectedModelData.name}</span>
+              <span className="text-xs text-muted-foreground">
+                {selectedModelData.developer}
+              </span>
+            </>
+          ) : (
+            "Select a model"
+          )}
+        </div>
+        <ChevronDown
+          className={`h-4 w-4 transition-transform ${
+            isOpen ? "rotate-180" : ""
+          }`}
+        />
+      </button>
 
-      <Select.Portal>
-        <Select.Content className='z-50 min-w-[220px] overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md'>
-          <Select.ScrollUpButton className='flex items-center justify-center h-[25px] bg-white text-violet11 cursor-default'>
-            <ChevronDown className='h-4 w-4 rotate-180' />
-          </Select.ScrollUpButton>
-
-          <Select.Viewport className='p-1'>
+      {isOpen && (
+        <div className="absolute left-0 bottom-full mb-2 w-full bg-background border rounded-md shadow-lg z-10 max-h-60 overflow-auto">
+          <ul className="py-1" role="listbox" id="model-selector">
             {models.map((model) => (
-              <Select.Item
+              <li
                 key={model.id}
-                value={model.id}
-                className='relative flex items-center gap-2 px-8 py-2 text-sm rounded-sm hover:bg-accent cursor-pointer outline-none data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground'
+                role="option"
+                aria-selected={selectedModel === model.id}
+                onClick={() => {
+                  onModelChange(model.id);
+                  setIsOpen(false);
+                }}
+                className={`flex items-center justify-between px-3 py-2 text-sm cursor-pointer hover:bg-accent/10 transition-colors ${
+                  selectedModel === model.id ? "bg-accent/20" : ""
+                }`}
               >
-                <Select.ItemIndicator className='absolute left-2 inline-flex items-center justify-center'>
-                  <Check className='h-4 w-4' />
-                </Select.ItemIndicator>
-                <div>
-                  <div className='font-medium'>{model.name}</div>
-                  <div className='text-xs text-muted-foreground'>
-                    {model.developer} · {model.contextWindow.toLocaleString()}{" "}
-                    tokens
-                  </div>
+                <div className="flex flex-col">
+                  <span className="font-medium">{model.name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {model.developer}
+                    {model.contextWindow &&
+                      ` · ${model.contextWindow.toLocaleString()} tokens`}
+                  </span>
                 </div>
-              </Select.Item>
+                {selectedModel === model.id && (
+                  <Check className="h-4 w-4 text-primary" />
+                )}
+              </li>
             ))}
-          </Select.Viewport>
-
-          <Select.ScrollDownButton className='flex items-center justify-center h-[25px] bg-white text-violet11 cursor-default'>
-            <ChevronDown className='h-4 w-4' />
-          </Select.ScrollDownButton>
-        </Select.Content>
-      </Select.Portal>
-    </Select.Root>
+          </ul>
+        </div>
+      )}
+    </div>
   );
 };
 

@@ -1,120 +1,156 @@
-// src\contexts\AuthContext.tsx
 import { createContext, useContext, useState, useEffect } from "react";
 import axios from "@/lib/axios";
 import { toast } from "react-hot-toast";
 
+interface User {
+  id: string;
+  email: string;
+  name: string;
+  image?: string;
+  provider: "gmail" | "outlook" | "yahoo";
+}
+
 interface AuthContextType {
-  user: any;
+  user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (provider: string) => void;
   logout: () => void;
+  refreshSession: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState<User | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [sessionChecked, setSessionChecked] = useState(false);
 
-  useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        setIsLoading(true);
-        const { data } = await axios.get("/api/auth/me");
-        setUser(data.user);
-        setIsAuthenticated(true);
-      } catch (error) {
-        // Only show error message if it's not a 401 (unauthorized)
-        if ((error as any)?.response?.status !== 401) {
-          toast.error("Failed to verify authentication status");
-        }
-        setUser(null);
-        setIsAuthenticated(false);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    checkAuth();
-  }, []);
-
-  // Check URL for auth callback parameters
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const token = urlParams.get("token");
-    const error = urlParams.get("error");
-
-    if (token) {
-      // Save token to localStorage or cookies
-      localStorage.setItem("auth_token", token);
-      // Remove token from URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-      // Trigger auth check
-      checkAuthWithToken(token);
-    }
-
-    if (error) {
-      toast.error(`Authentication failed: ${error}`);
-      // Remove error from URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-    }
-  }, []);
-
-  const checkAuthWithToken = async (token: string) => {
+  const checkAuth = async () => {
     try {
       setIsLoading(true);
-      const { data } = await axios.get("/api/auth/me", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const { data } = await axios.get("/api/auth/me");
       setUser(data.user);
       setIsAuthenticated(true);
-      toast.success("Successfully logged in!");
+      return true;
     } catch (error) {
-      toast.error("Login failed. Please try again.");
+      if ((error as any)?.response?.status !== 401) {
+        toast.error("Failed to verify authentication status");
+      }
       setUser(null);
       setIsAuthenticated(false);
-      localStorage.removeItem("auth_token");
+      return false;
     } finally {
       setIsLoading(false);
+      setSessionChecked(true);
     }
   };
 
-  const login = (provider: string) => {
-    // Show loading toast
-    toast.loading("Redirecting to login...", {
-      id: "login-redirect",
-    });
+  // Initial session check
+  useEffect(() => {
+    checkAuth();
+  }, []);
 
-    // Redirect to auth endpoint
-    window.location.href = `${
-      import.meta.env.VITE_API_URL
-    }/api/auth/${provider}?redirect_url=${encodeURIComponent(
-      window.location.origin
-    )}`;
+  // Periodic session refresh (every 5 minutes)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const intervalId = setInterval(() => {
+      refreshSession();
+    }, 5 * 60 * 1000); // 5 minutes
+
+    return () => clearInterval(intervalId);
+  }, [isAuthenticated]);
+
+  const refreshSession = async () => {
+    try {
+      const { data } = await axios.post("/api/auth/refresh");
+      setUser(data.user);
+      setIsAuthenticated(true);
+    } catch (error) {
+      if ((error as any)?.response?.status === 401) {
+        // Session expired
+        setUser(null);
+        setIsAuthenticated(false);
+        toast.error("Session expired. Please login again.");
+        window.location.href = "/login";
+      }
+    }
+  };
+
+  const login = async (provider: string) => {
+    try {
+      // Check if already authenticated
+      if (isAuthenticated && user) {
+        if (user.provider === provider) {
+          toast.success("Already logged in!");
+          window.location.href = "/dashboard";
+          return;
+        } else {
+          // If trying to login with a different provider, logout first
+          await logout();
+        }
+      }
+
+      const currentUrl = window.location.origin;
+      toast.loading("Redirecting to login...");
+
+      // For development, use restricted scopes
+      const scopes =
+        process.env.NODE_ENV === "development"
+          ? ["profile", "email"] // Basic scopes for development
+          : [
+              "profile",
+              "email",
+              "https://www.googleapis.com/auth/gmail.modify",
+            ]; // Full scopes for production
+
+      const scopeParam = encodeURIComponent(scopes.join(" "));
+      const redirectUrl = `${
+        import.meta.env.VITE_API_URL
+      }/api/auth/${provider}?redirect_url=${encodeURIComponent(
+        currentUrl
+      )}&scopes=${scopeParam}`;
+
+      window.location.href = redirectUrl;
+    } catch (error) {
+      toast.error("Login failed. Please try again.");
+      console.error("Login error:", error);
+    }
   };
 
   const logout = async () => {
     try {
-      setIsLoading(true);
       await axios.post("/api/auth/logout");
       setUser(null);
       setIsAuthenticated(false);
-      localStorage.removeItem("auth_token");
       toast.success("Successfully logged out");
+      window.location.href = "/login";
     } catch (error) {
-      console.error("Logout failed:", error);
       toast.error("Logout failed");
-    } finally {
-      setIsLoading(false);
     }
   };
 
+  // Don't render children until initial session check is complete
+  if (!sessionChecked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500"></div>
+      </div>
+    );
+  }
+
   return (
     <AuthContext.Provider
-      value={{ user, isAuthenticated, isLoading, login, logout }}
+      value={{
+        user,
+        isAuthenticated,
+        isLoading,
+        login,
+        logout,
+        refreshSession,
+      }}
     >
       {children}
     </AuthContext.Provider>

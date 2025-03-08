@@ -4,7 +4,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
-import EmailView from "@/pages/EmailView";
+// import EmailView from "@/pages/EmailView";
 import Chat from "@/pages/Chat";
 import { Loader2 } from "lucide-react";
 
@@ -38,7 +38,7 @@ const AppRoutes = () => {
         }
       >
         <Route index element={<Dashboard />} />
-        <Route path='email/:id' element={<EmailView />} />
+        {/* <Route path='email/:id' element={<EmailView />} /> */}
         <Route path='chat' element={<Chat />} />
         <Route
           path='settings'
