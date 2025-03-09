@@ -50,7 +50,9 @@ const ChatContainer: React.FC = () => {
 
   const scrollToBottom = () => {
     if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 100); // Add a small delay to ensure DOM updates complete
     }
   };
 
@@ -74,8 +76,7 @@ const ChatContainer: React.FC = () => {
         },
       ]);
     },
-    onSuccess: (response, variables) => {
-      // Replace loading message with actual response
+    onSuccess: (response) => {
       setMessages((prev) => {
         const newMessages = [...prev];
         const loadingIndex = newMessages.findIndex((msg) => msg.loading);
@@ -91,7 +92,6 @@ const ChatContainer: React.FC = () => {
       });
     },
     onError: (error) => {
-      // Remove loading message and show error
       setMessages((prev) => prev.filter((msg) => !msg.loading));
       toast.error("Failed to process message");
       console.error("AI processing error:", error);
@@ -117,7 +117,7 @@ const ChatContainer: React.FC = () => {
       action: "process",
       model: selectedModel,
       context: {
-        emails: emails || [],
+        emails: emails?.messages || [], // Fixed: Use messages array from the EmailsResponse
         previousMessages: messages,
       },
     });
@@ -141,7 +141,7 @@ const ChatContainer: React.FC = () => {
         action: "process",
         model: selectedModel,
         context: {
-          emails: emails || [],
+          emails: emails?.messages || [], // Fixed: Use messages array from the EmailsResponse
           previousMessages: messages.slice(0, messageIndex),
         },
       });
@@ -162,8 +162,11 @@ const ChatContainer: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col h-full bg-background" ref={containerRef}>
-      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
+    <div
+      className="flex flex-col h-full bg-background overflow-hidden"
+      ref={containerRef}
+    >
+      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6 max-h-[calc(100vh-200px)]">
         {messages.length === 0 ? (
           <div className="h-full flex items-center justify-center text-center">
             <div className="max-w-md space-y-4">
@@ -198,7 +201,7 @@ const ChatContainer: React.FC = () => {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 ">
         <div className="p-4 border-b">
           <ModelSelector
             selectedModel={selectedModel}

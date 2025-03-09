@@ -37,12 +37,12 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
   return (
     <div
-      className={`py-6 transition-opacity ${
+      className={`py-6 transition-opacity  ${
         isUser ? "bg-accent/10" : "bg-background"
       }`}
       style={{ opacity: message.loading ? 0.7 : 1 }}
     >
-      <div className="container max-w-full mx-auto">
+      <div className="container max-w-full mx-auto ">
         <div className="flex gap-4">
           {/* User / Assistant Avatar */}
           <div className="flex-shrink-0">
@@ -70,7 +70,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             </div>
 
             {/* Scrollable Message Content */}
-            <div className="prose prose-sm max-w-none dark:prose-invert overflow-y-auto max-h-64 p-2 rounded-md border border-gray-200 dark:border-gray-700">
+            <div className="prose prose-sm max-w-none w-full dark:prose-invert overflow-y-auto max-h-64 p-2 rounded-md border border-gray-200 dark:border-gray-700">
               {message.loading ? (
                 <div className="flex items-center gap-2">
                   <Loader2 className="h-4 w-4 animate-spin" />

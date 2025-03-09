@@ -2,9 +2,10 @@ import express from "express";
 import { google } from "googleapis";
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
-import { auth, AuthRequest } from "../middleware/auth.js";
+import { auth, AuthRequest, tokenAuth } from "../middleware/auth.js";
 import * as msal from "@azure/msal-node";
 import axios from "axios";
+import { refreshTokenByProvider } from "../services/tokenService.js";
 
 const router = express.Router();
 
@@ -16,10 +17,14 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 // Microsoft OAuth configuration
+if (!process.env.MICROSOFT_CLIENT_ID || !process.env.MICROSOFT_CLIENT_SECRET) {
+  throw new Error("Microsoft OAuth client ID or secret is not defined");
+}
+
 const msalConfig = {
   auth: {
-    clientId: process.env.MICROSOFT_CLIENT_ID!,
-    clientSecret: process.env.MICROSOFT_CLIENT_SECRET!,
+    clientId: process.env.MICROSOFT_CLIENT_ID,
+    clientSecret: process.env.MICROSOFT_CLIENT_SECRET,
     authority: "https://login.microsoftonline.com/common",
   },
 };
@@ -31,8 +36,8 @@ const YAHOO_AUTH_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 
 // Google OAuth login
 router.get("/google", (req, res) => {
-  const redirectUrl = req.query.redirect_url as string;
-  const scopes = ((req.query.scopes as string) || "").split(" ");
+  const redirectUrl = req.query.redirect_url;
+  const requestedScopes = ((req.query.scopes || "") + "").split(" ");
 
   if (redirectUrl) {
     res.cookie("frontend_redirect", redirectUrl, {
@@ -43,29 +48,45 @@ router.get("/google", (req, res) => {
     });
   }
 
+  // Always use the full set of scopes in production for a consistent user experience
+  // In development, limit to basic scopes as specified in the query
   const defaultScopes =
     process.env.NODE_ENV === "development"
       ? ["profile", "email"]
       : ["profile", "email", "https://www.googleapis.com/auth/gmail.modify"];
 
+  const scopes = requestedScopes.length > 0 ? requestedScopes : defaultScopes;
+
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
-    scope: scopes.length > 0 ? scopes : defaultScopes,
-    prompt: "consent",
+    scope: scopes,
+    prompt: "consent", // Always show consent screen to ensure we get a refresh token
     include_granted_scopes: true,
   });
 
   res.redirect(url);
 });
 
-// Google OAuth callback route (missing in original code)
+// Google OAuth callback route
 router.get("/google/callback", async (req, res) => {
   const { code } = req.query;
   const frontendRedirect =
     req.cookies.frontend_redirect || process.env.FRONTEND_URL;
 
+  if (!code) {
+    return res.redirect(`${frontendRedirect}/login?error=no_code_provided`);
+  }
+
   try {
+    // Exchange authorization code for tokens
     const { tokens } = await oauth2Client.getToken(code as string);
+
+    // Verify we have access token
+    if (!tokens.access_token) {
+      throw new Error("No access token received");
+    }
+
+    // Set credentials to get user info
     oauth2Client.setCredentials(tokens);
 
     const oauth2 = google.oauth2({
@@ -73,10 +94,16 @@ router.get("/google/callback", async (req, res) => {
       version: "v2",
     });
 
+    // Get user profile
     const { data } = await oauth2.userinfo.get();
+    if (!data.id || !data.email) {
+      throw new Error("Invalid user data received");
+    }
 
+    // Find or create user
     let user = await User.findOne({ googleId: data.id });
     if (!user) {
+      // Create new user
       user = await User.create({
         email: data.email,
         name: data.name,
@@ -86,6 +113,7 @@ router.get("/google/callback", async (req, res) => {
         refreshToken: tokens.refresh_token,
       });
     } else {
+      // Update existing user
       user.googleAccessToken = tokens.access_token;
       if (tokens.refresh_token) {
         user.refreshToken = tokens.refresh_token;
@@ -93,7 +121,56 @@ router.get("/google/callback", async (req, res) => {
       await user.save();
     }
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET!, {
+    // Generate JWT
+    if (!process.env.JWT_SECRET) {
+      throw new Error("JWT_SECRET is not defined");
+    }
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    // Set cookie
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    // Redirect back to frontend
+    res.redirect(frontendRedirect);
+  } catch (error) {
+    console.error("Google callback error:", error);
+    res.redirect(`${frontendRedirect}/login?error=google_auth_failed`);
+  }
+});
+
+// Token refresh endpoint (new)
+router.post("/refresh", tokenAuth, async (req: AuthRequest, res) => {
+  try {
+    if (!req.user || !req.user.userId || !req.user.provider) {
+      return res.status(401).json({ error: "Invalid user information" });
+    }
+
+    // Refresh the provider's access token
+    await refreshTokenByProvider(req.user.userId, req.user.provider);
+
+    // Get updated user info
+    const user = await User.findById(req.user.userId).select(
+      "-googleAccessToken -microsoftAccessToken -yahooAccessToken -refreshToken"
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Refresh JWT token too
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) {
+      throw new Error("JWT_SECRET is not defined");
+    }
+
+    const token = jwt.sign({ userId: user._id }, jwtSecret, {
       expiresIn: "7d",
     });
 
@@ -104,10 +181,10 @@ router.get("/google/callback", async (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.redirect(frontendRedirect);
+    res.json({ user });
   } catch (error) {
-    console.error("Google callback error:", error);
-    res.redirect(`${frontendRedirect}/login?error=google_auth_failed`);
+    console.error("Token refresh error:", error);
+    res.status(401).json({ error: "Failed to refresh token" });
   }
 });
 
@@ -173,7 +250,12 @@ router.get("/microsoft/callback", async (req, res) => {
       await user.save();
     }
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET!, {
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) {
+      throw new Error("JWT_SECRET is not defined");
+    }
+
+    const token = jwt.sign({ userId: user._id }, jwtSecret, {
       expiresIn: "7d",
     });
 
@@ -204,9 +286,19 @@ router.get("/yahoo", (req, res) => {
     });
   }
 
+  const yahooClientId = process.env.YAHOO_CLIENT_ID;
+  if (!yahooClientId) {
+    throw new Error("YAHOO_CLIENT_ID is not defined");
+  }
+
+  const yahooRedirectUri = process.env.YAHOO_REDIRECT_URI;
+  if (!yahooRedirectUri) {
+    throw new Error("YAHOO_REDIRECT_URI is not defined");
+  }
+
   const params = new URLSearchParams({
-    client_id: process.env.YAHOO_CLIENT_ID!,
-    redirect_uri: process.env.YAHOO_REDIRECT_URI!,
+    client_id: yahooClientId,
+    redirect_uri: yahooRedirectUri,
     response_type: "code",
     scope: "openid mail-r",
   });
@@ -222,15 +314,30 @@ router.get("/yahoo/callback", async (req, res) => {
     req.cookies.frontend_redirect || process.env.FRONTEND_URL;
 
   try {
+    const yahooClientId = process.env.YAHOO_CLIENT_ID;
+    if (!yahooClientId) {
+      throw new Error("YAHOO_CLIENT_ID is not defined");
+    }
+
+    const yahooClientSecret = process.env.YAHOO_CLIENT_SECRET;
+    if (!yahooClientSecret) {
+      throw new Error("YAHOO_CLIENT_SECRET is not defined");
+    }
+
+    const yahooRedirectUri = process.env.YAHOO_REDIRECT_URI;
+    if (!yahooRedirectUri) {
+      throw new Error("YAHOO_REDIRECT_URI is not defined");
+    }
+
     // Exchange code for tokens
     const tokenResponse = await axios.post(
       "https://api.login.yahoo.com/oauth2/get_token",
       new URLSearchParams({
         grant_type: "authorization_code",
         code: code as string,
-        redirect_uri: process.env.YAHOO_REDIRECT_URI!,
-        client_id: process.env.YAHOO_CLIENT_ID!,
-        client_secret: process.env.YAHOO_CLIENT_SECRET!,
+        redirect_uri: yahooRedirectUri,
+        client_id: yahooClientId,
+        client_secret: yahooClientSecret,
       }).toString(),
       {
         headers: {
@@ -265,7 +372,12 @@ router.get("/yahoo/callback", async (req, res) => {
       await user.save();
     }
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET!, {
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) {
+      throw new Error("JWT_SECRET is not defined");
+    }
+
+    const token = jwt.sign({ userId: user._id }, jwtSecret, {
       expiresIn: "7d",
     });
 

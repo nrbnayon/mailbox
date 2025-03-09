@@ -1,4 +1,3 @@
-// backend\src\routes\ai.ts
 import express from "express";
 import { Groq } from "groq-sdk";
 import { auth, AuthRequest } from "../middleware/auth.js";
@@ -30,6 +29,11 @@ router.post("/process", auth, async (req: AuthRequest, res) => {
     if (model.apiType === "deepseek" && process.env.DEEPSEEK_API_KEY) {
       // DeepSeek API implementation
       try {
+        // Check if we have the necessary API key
+        if (!process.env.DEEPSEEK_API_KEY) {
+          throw new Error("DeepSeek API key not configured");
+        }
+
         const deepseekResponse = await axios.post(
           "https://api.deepseek.com/v1/chat/completions",
           {
@@ -67,11 +71,61 @@ For data summaries, use tables to present information clearly.`,
         aiResponse =
           deepseekResponse.data.choices[0]?.message?.content ||
           "I couldn't process that request with DeepSeek.";
-      } catch (error) {
-        console.error("DeepSeek API error:", error);
-        return res
-          .status(500)
-          .json({ error: "Failed to process with DeepSeek API" });
+      } catch (deepseekError) {
+        console.error("DeepSeek API error:", deepseekError);
+
+        // Fall back to Groq API if DeepSeek fails
+        console.log("Falling back to Groq API due to DeepSeek error");
+
+        try {
+          // Use a fallback model from Groq
+          const fallbackModel = "mixtral-8x7b-32768";
+
+          const completion = await groq.chat.completions.create({
+            messages: [
+              {
+                role: "system",
+                content: `You are an AI email assistant that helps users manage their ${provider} inbox. You can:
+1. Read and analyze emails
+2. Summarize email content
+3. Extract key information and action items
+4. Help compose responses
+5. Organize emails by topic or importance
+6. Search for specific email content or topics
+
+Always be helpful, clear, and concise. Format responses in a structured way using markdown when appropriate.
+For data summaries, use tables to present information clearly.`,
+              },
+              {
+                role: "user",
+                content: `${action}: ${content}`,
+              },
+            ],
+            model: fallbackModel,
+            temperature: 0.5,
+            max_tokens: model.maxCompletionTokens || 1024,
+          });
+
+          aiResponse =
+            completion.choices[0]?.message?.content ||
+            "I couldn't process that request.";
+
+          return res.json({
+            response: aiResponse,
+            model: {
+              id: fallbackModel,
+              name: "Mixtral-8x7b (Fallback)",
+              developer: "Mistral",
+            },
+            note: "Used fallback model due to DeepSeek API error",
+          });
+        } catch (groqError) {
+          console.error("Groq fallback error:", groqError);
+          return res.status(500).json({
+            error: "Failed to process with both DeepSeek and Groq APIs",
+            details: String(deepseekError),
+          });
+        }
       }
     } else {
       // Use Groq API
@@ -136,44 +190,11 @@ For data summaries, use tables to present information clearly.`,
     });
   } catch (error) {
     console.error("AI processing error:", error);
-    res.status(500).json({ error: "Failed to process with AI" });
+    res.status(500).json({
+      error: "Failed to process with AI",
+      details: error instanceof Error ? error.message : String(error),
+    });
   }
 });
 
 export default router;
-
-// Example backend/src/routes/ai.ts implementation
-// import express from "express";
-// import { getModelById } from "../config/models.js";
-
-// const router = express.Router();
-
-// router.post("/process", async (req, res) => {
-//   try {
-//     const { content, action, modelId, context } = req.body;
-
-//     // Validate model ID
-//     const model = getModelById(modelId);
-//     if (!model) {
-//       console.error(`Model with ID ${modelId} not found`);
-//       return res.status(400).json({ error: "Invalid model ID" });
-//     }
-
-//     console.log(`Processing request with model: ${model.name} (${model.developer})`);
-
-//     // Process with the selected model
-//     // Your AI processing logic here
-
-//     // For demonstration, just return a simple response
-//     res.json({
-//       response: `Processed with ${model.name}: ${content.substring(0, 30)}...`,
-//       model: model.id,
-//       timestamp: new Date()
-//     });
-//   } catch (error) {
-//     console.error("Error processing AI request:", error);
-//     res.status(500).json({ error: "Failed to process request" });
-//   }
-// });
-
-// export default router;

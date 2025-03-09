@@ -35,10 +35,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
       try {
         setIsLoading(true);
         const modelsList = await getModels();
-        console.log("Models fetched successfully:", modelsList);
         setModels(modelsList);
-
-        // If no model is selected or the selected model isn't in the list, set the default
         if (!selectedModel || !modelsList.find((m) => m.id === selectedModel)) {
           try {
             const defaultModel = await getDefaultModel();
@@ -46,7 +43,6 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
             onModelChange(defaultModel.id);
           } catch (defaultError) {
             console.error("Error fetching default model:", defaultError);
-            // If default model fetch fails, use the first model in the list
             if (modelsList.length > 0) {
               onModelChange(modelsList[0].id);
             }
@@ -145,7 +141,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
       </button>
 
       {isOpen && (
-        <div className="absolute left-0 bottom-full mb-2 w-full bg-background border rounded-md shadow-lg z-10 max-h-60 overflow-auto">
+        <div className="absolute left-0 bottom-full mb-2 w-full bg-white border rounded-md shadow-lg z-10 max-h-60 overflow-auto">
           <ul className="py-1" role="listbox" id="model-selector">
             {models.map((model) => (
               <li

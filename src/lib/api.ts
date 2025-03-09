@@ -318,9 +318,6 @@ export const processWithAI = async ({
     previousMessages: any[];
   };
 }) => {
-  console.log(`Sending AI request with model: ${model}`);
-  console.log(`Request content: ${content.substring(0, 50)}...`);
-
   try {
     const { data } = await axios.post("/api/ai/process", {
       content,
@@ -328,7 +325,6 @@ export const processWithAI = async ({
       modelId: model,
       context,
     });
-    console.log("AI response received successfully");
     return data;
   } catch (error) {
     console.error("Error processing AI request:", error);
