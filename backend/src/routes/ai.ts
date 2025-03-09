@@ -21,6 +21,12 @@ const openai = process.env.OPENAI_API_KEY
 router.post("/process", auth, async (req: AuthRequest, res) => {
   try {
     const { content, action, modelId, context } = req.body;
+    console.log("All processed", context, {
+      action,
+      modelId,
+      context,
+      content,
+    });
     const provider = "email";
 
     // Get model configuration
