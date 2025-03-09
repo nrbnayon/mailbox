@@ -117,14 +117,13 @@ const ChatContainer: React.FC = () => {
       action: "process",
       model: selectedModel,
       context: {
-        emails: emails?.messages || [], // Fixed: Use messages array from the EmailsResponse
+        emails: emails?.messages || [],
         previousMessages: messages,
       },
     });
   };
 
   const handleModelChange = (modelId: string) => {
-    console.log("Model changed to:", modelId);
     setSelectedModel(modelId);
   };
 

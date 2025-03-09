@@ -60,7 +60,7 @@ export const availableModels: AIModel[] = [
     description: "Specialized model for coding assistance and technical tasks",
   },
   {
-    id: "deepseek-llm",
+    id: "deepseek-chat",
     name: "DeepSeek Chat",
     developer: "DeepSeek",
     contextWindow: 64000,
@@ -68,8 +68,6 @@ export const availableModels: AIModel[] = [
     apiType: "deepseek",
     description: "Versatile model for conversational AI and general tasks",
   },
-
-  // New models from the list
   {
     id: "distil-whisper-large-v3-en",
     name: "Distil Whisper Large v3 (English)",

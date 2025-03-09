@@ -149,7 +149,6 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
                 role="option"
                 aria-selected={selectedModel === model.id}
                 onClick={() => {
-                  console.log("Selected model:", model.id);
                   onModelChange(model.id);
                   setIsOpen(false);
                 }}

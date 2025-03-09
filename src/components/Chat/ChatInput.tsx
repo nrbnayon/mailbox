@@ -31,13 +31,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
   useEffect(() => {
     const fetchModelInfo = async () => {
       try {
-        if (modelData) {
-          // Use provided model data
-          setDisplayModelInfo(
-            `Using ${modelData.name} (${modelData.developer})`
-          );
-        } else if (selectedModel) {
-          // If we need to fetch model data
+        if (selectedModel) {
           const modelInfo = await getModelById(selectedModel);
           if (modelInfo) {
             setDisplayModelInfo(
@@ -46,6 +40,10 @@ const ChatInput: React.FC<ChatInputProps> = ({
           } else {
             setDisplayModelInfo(`Using ${selectedModel}`);
           }
+        } else if (modelData) {
+          setDisplayModelInfo(
+            `Using ${modelData.name} (${modelData.developer})`
+          );
         } else {
           setDisplayModelInfo("No model selected");
         }
