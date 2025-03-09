@@ -43,8 +43,29 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 const router = express.Router();
 
+// ✅ Fix: Ensure extractBody function is defined BEFORE usage
+const extractBody = (
+  parts: gmail_v1.Schema$MessagePart[] | undefined
+): string => {
+  if (!parts) return "";
+
+  let body = "";
+
+  parts.forEach((part) => {
+    if (part.mimeType === "text/html" && part.body?.data) {
+      body += Buffer.from(part.body.data, "base64").toString("utf-8");
+    } else if (part.mimeType === "text/plain" && part.body?.data) {
+      body += Buffer.from(part.body.data, "base64").toString("utf-8");
+    } else if (part.parts) {
+      body += extractBody(part.parts); // Recursively extract nested parts
+    }
+  });
+
+  return body.trim();
+};
+
 // Helper function to initialize Gmail API client
-const getGmailClient = async (userId: any) => {
+const getGmailClient = async (userId: string) => {
   const user = await User.findById(userId);
   if (!user) {
     throw new Error("User not found");
@@ -239,102 +260,6 @@ router.get("/threads/:id", auth, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error("Error fetching thread:", error);
     res.status(500).json({ error: "Failed to fetch thread" });
-  }
-});
-
-// Get single email with detailed parsing
-router.get("/:id", auth, async (req: AuthRequest, res) => {
-  try {
-    const gmail = await getGmailClient(req.user!.userId);
-
-    const email = await gmail.users.messages.get({
-      userId: "me",
-      id: req.params.id,
-      format: "full",
-    });
-
-    // Process email to extract body content and attachments
-    const headers = email.data.payload?.headers || [];
-    const parts = email.data.payload?.parts || [];
-
-    let htmlBody = "";
-    let plainBody = "";
-    const attachments: {
-      id: string;
-      filename: string;
-      mimeType: string;
-      size: number;
-    }[] = [];
-
-    // Function to process message parts recursively
-    const processParts = (parts: any) => {
-      if (!parts) return;
-
-      for (const part of parts) {
-        const { mimeType, body, filename, parts: subParts } = part;
-
-        // Process attachments
-        if (filename && filename.length > 0) {
-          attachments.push({
-            id: body.attachmentId,
-            filename,
-            mimeType,
-            size: body.size,
-          });
-        }
-        // Process HTML body
-        else if (mimeType === "text/html" && body.data) {
-          const buff = Buffer.from(body.data, "base64");
-          htmlBody += buff.toString();
-        }
-        // Process plain text body
-        else if (mimeType === "text/plain" && body.data) {
-          const buff = Buffer.from(body.data, "base64");
-          plainBody += buff.toString();
-        }
-        // Process nested parts
-        else if (subParts) {
-          processParts(subParts);
-        }
-      }
-    };
-
-    // Handle case where email body is directly in the payload
-    if (email.data.payload?.body?.data) {
-      const buff = Buffer.from(email.data.payload.body.data, "base64");
-      if (email.data.payload.mimeType === "text/html") {
-        htmlBody = buff.toString();
-      } else if (email.data.payload.mimeType === "text/plain") {
-        plainBody = buff.toString();
-      }
-    } else if (parts) {
-      processParts(parts);
-    }
-
-    // Extract header information
-    const emailData = {
-      id: email.data.id,
-      threadId: email.data.threadId,
-      labelIds: email.data.labelIds,
-      snippet: email.data.snippet,
-      internalDate: email.data.internalDate,
-      headers: headers.reduce((acc, header) => {
-        if (header.name && header.value) {
-          (acc as any)[header.name.toLowerCase()] = header.value;
-        }
-        return acc;
-      }, {}),
-      body: {
-        html: htmlBody,
-        plain: plainBody,
-      },
-      attachments,
-    };
-
-    res.json(emailData);
-  } catch (error) {
-    console.error("Error fetching email:", error);
-    res.status(500).json({ error: "Failed to fetch email" });
   }
 });
 
@@ -759,25 +684,25 @@ router.post(
       let originalBody = "";
 
       // Function to extract body content
-     const extractBody = (
-       parts: gmail_v1.Schema$MessagePart[] | undefined
-     ): string => {
-       if (!parts) return "";
+      const extractBody = (
+        parts: gmail_v1.Schema$MessagePart[] | undefined
+      ): string => {
+        if (!parts) return "";
 
-       let body = "";
+        let body = "";
 
-       parts.forEach((part) => {
-         if (part.mimeType === "text/html" && part.body?.data) {
-           body += Buffer.from(part.body.data, "base64").toString("utf-8");
-         } else if (part.mimeType === "text/plain" && part.body?.data) {
-           body += Buffer.from(part.body.data, "base64").toString("utf-8");
-         } else if (part.parts) {
-           body += extractBody(part.parts); // Recursive call to extract nested content
-         }
-       });
+        parts.forEach((part) => {
+          if (part.mimeType === "text/html" && part.body?.data) {
+            body += Buffer.from(part.body.data, "base64").toString("utf-8");
+          } else if (part.mimeType === "text/plain" && part.body?.data) {
+            body += Buffer.from(part.body.data, "base64").toString("utf-8");
+          } else if (part.parts) {
+            body += extractBody(part.parts); // Recursively extract nested parts
+          }
+        });
 
-       return body.trim();
-     };
+        return body.trim();
+      };
 
       // If body is directly in payload
       if (originalEmail.data.payload?.body?.data) {
@@ -787,7 +712,7 @@ router.post(
         );
         originalBody = buff.toString();
       } else {
-        originalBody = await extractBody(parts);
+        originalBody = extractBody(parts);
       }
 
       messageParts.push("");
@@ -964,6 +889,73 @@ router.delete("/:id", auth, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error("Error deleting email:", error);
     res.status(500).json({ error: "Failed to delete email" });
+  }
+});
+
+// ✅ Fix: Get single email with proper extractBody usage
+router.get("/:id", auth, async (req: AuthRequest, res) => {
+  try {
+    const gmail = await getGmailClient(req.user!.userId);
+
+    const email = await gmail.users.messages.get({
+      userId: "me",
+      id: req.params.id,
+      format: "full",
+    });
+
+    const headers = email.data.payload?.headers || [];
+    const parts = email.data.payload?.parts || [];
+
+    let htmlBody = "";
+    let plainBody = "";
+
+    // Directly check if email body is present in payload
+    if (email.data.payload?.body?.data) {
+      const buff = Buffer.from(email.data.payload.body.data, "base64");
+      if (email.data.payload.mimeType === "text/html") {
+        htmlBody = buff.toString();
+      } else if (email.data.payload.mimeType === "text/plain") {
+        plainBody = buff.toString();
+      }
+    } else {
+      // Extract body from parts
+      const extractedBody = extractBody(parts);
+      if (extractedBody.includes("<")) {
+        htmlBody = extractedBody;
+      } else {
+        plainBody = extractedBody;
+      }
+    }
+
+    res.json({
+      id: email.data.id,
+      threadId: email.data.threadId,
+      labelIds: email.data.labelIds,
+      snippet: email.data.snippet,
+      internalDate: email.data.internalDate,
+      headers: headers.reduce((acc, header) => {
+        if (header.name && header.value) {
+          (acc as any)[header.name.toLowerCase()] = header.value;
+        }
+        return acc;
+      }, {}),
+      body: {
+        html: htmlBody,
+        plain: plainBody,
+      },
+      attachments:
+        email.data.payload?.parts
+          ?.filter((part) => part.filename)
+          ?.map((part) => ({
+            id: part.body?.attachmentId,
+            filename: part.filename,
+            mimeType: part.mimeType,
+            size: part.body?.size,
+          })) || [],
+    });
+  } catch (error) {
+    console.error("Error fetching email:", error);
+    res.status(500).json({ error: "Failed to fetch email" });
   }
 });
 

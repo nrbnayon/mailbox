@@ -141,3 +141,39 @@ For data summaries, use tables to present information clearly.`,
 });
 
 export default router;
+
+// Example backend/src/routes/ai.ts implementation
+// import express from "express";
+// import { getModelById } from "../config/models.js";
+
+// const router = express.Router();
+
+// router.post("/process", async (req, res) => {
+//   try {
+//     const { content, action, modelId, context } = req.body;
+
+//     // Validate model ID
+//     const model = getModelById(modelId);
+//     if (!model) {
+//       console.error(`Model with ID ${modelId} not found`);
+//       return res.status(400).json({ error: "Invalid model ID" });
+//     }
+
+//     console.log(`Processing request with model: ${model.name} (${model.developer})`);
+
+//     // Process with the selected model
+//     // Your AI processing logic here
+
+//     // For demonstration, just return a simple response
+//     res.json({
+//       response: `Processed with ${model.name}: ${content.substring(0, 30)}...`,
+//       model: model.id,
+//       timestamp: new Date()
+//     });
+//   } catch (error) {
+//     console.error("Error processing AI request:", error);
+//     res.status(500).json({ error: "Failed to process request" });
+//   }
+// });
+
+// export default router;

@@ -42,7 +42,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
       }`}
       style={{ opacity: message.loading ? 0.7 : 1 }}
     >
-      <div className="container max-w-3xl mx-auto">
+      <div className="container max-w-full mx-auto">
         <div className="flex gap-4">
           {/* User / Assistant Avatar */}
           <div className="flex-shrink-0">

@@ -1,26 +1,34 @@
 import axios from "./axios";
 
+export interface EmailAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface EmailBody {
+  html: string;
+  plain: string;
+}
+
 export interface EmailResponse {
   id: string;
+  threadId?: string;
   subject: string;
   from: string;
   to: string;
+  cc?: string;
+  bcc?: string;
   preview: string;
-  content: string;
+  content?: string;
   date: string;
   unread: boolean;
-  starred?: boolean;
+  starred: boolean;
   labels: string[];
-  body?: {
-    html: string;
-    plain: string;
-  };
-  attachments?: {
-    id: string;
-    filename: string;
-    mimeType: string;
-    size: number;
-  }[];
+  body?: EmailBody;
+  attachments?: EmailAttachment[];
+  internalDate?: string;
 }
 
 export interface GetEmailsParams {
@@ -38,6 +46,7 @@ export interface EmailsResponse {
   totalPages: number;
   currentPage: number;
 }
+
 export interface AIModel {
   id: string;
   name: string;
@@ -88,12 +97,27 @@ export const sendEmail = async (emailData: {
   to: string;
   subject: string;
   content: string;
+  cc?: string;
+  bcc?: string;
   attachments?: File[];
+  isHtml?: boolean;
 }) => {
   const formData = new FormData();
   formData.append("to", emailData.to);
   formData.append("subject", emailData.subject);
-  formData.append("content", emailData.content);
+  formData.append("message", emailData.content);
+
+  if (emailData.cc) {
+    formData.append("cc", emailData.cc);
+  }
+
+  if (emailData.bcc) {
+    formData.append("bcc", emailData.bcc);
+  }
+
+  if (emailData.isHtml) {
+    formData.append("isHtml", String(emailData.isHtml));
+  }
 
   if (emailData.attachments) {
     emailData.attachments.forEach((file) => {
@@ -166,22 +190,107 @@ export const deleteEmail = async (id: string) => {
 
 export const unarchiveEmail = async (id: string) => {
   const { data } = await axios.post(`/api/emails/${id}/modify`, {
-    addLabelIds: [],
-    removeLabelIds: ["INBOX"],
+    addLabelIds: ["INBOX"],
+    removeLabelIds: ["CATEGORY_PERSONAL"],
   });
   return data;
 };
 
-// Fixed model methods
+export const replyToEmail = async (emailData: {
+  id: string;
+  message: string;
+  attachments?: File[];
+  isHtml?: boolean;
+}) => {
+  const formData = new FormData();
+  formData.append("message", emailData.message);
+
+  if (emailData.isHtml) {
+    formData.append("isHtml", String(emailData.isHtml));
+  }
+
+  if (emailData.attachments) {
+    emailData.attachments.forEach((file) => {
+      formData.append("attachments", file);
+    });
+  }
+
+  const { data } = await axios.post(
+    `/api/emails/${emailData.id}/reply`,
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
+  return data;
+};
+
+export const forwardEmail = async (emailData: {
+  id: string;
+  to: string;
+  message?: string;
+  attachments?: File[];
+  isHtml?: boolean;
+}) => {
+  const formData = new FormData();
+  formData.append("to", emailData.to);
+
+  if (emailData.message) {
+    formData.append("additionalMessage", emailData.message);
+  }
+
+  if (emailData.isHtml) {
+    formData.append("isHtml", String(emailData.isHtml));
+  }
+
+  if (emailData.attachments) {
+    emailData.attachments.forEach((file) => {
+      formData.append("attachments", file);
+    });
+  }
+
+  const { data } = await axios.post(
+    `/api/emails/${emailData.id}/forward`,
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
+  return data;
+};
+
+// AI Model methods
 export const getModels = async (): Promise<AIModel[]> => {
   try {
     const { data } = await axios.get("/api/models");
-
-    console.log("Data from /api/models:", data);
     return data;
   } catch (error) {
     console.error("Error fetching models:", error);
     throw error;
+  }
+};
+
+export const getModelById = async (
+  id: string
+): Promise<AIModel | undefined> => {
+  try {
+    const { data } = await axios.get(`/api/models/${id}`);
+    return data;
+  } catch (error) {
+    console.error(`Error fetching model with ID ${id}:`, error);
+
+    // Fallback to getting all models and finding the one we need
+    try {
+      const models = await getModels();
+      return models.find((model) => model.id === id);
+    } catch (fallbackError) {
+      console.error("Error in fallback model fetching:", fallbackError);
+      throw error;
+    }
   }
 };
 
@@ -198,22 +307,31 @@ export const getDefaultModel = async (): Promise<AIModel> => {
 export const processWithAI = async ({
   content,
   action,
-  modelId,
+  model,
   context,
 }: {
   content: string;
   action: string;
-  modelId: string;
+  model: string;
   context: {
     emails: EmailResponse[];
     previousMessages: any[];
   };
 }) => {
-  const { data } = await axios.post("/api/ai/process", {
-    content,
-    action,
-    modelId,
-    context,
-  });
-  return data;
+  console.log(`Sending AI request with model: ${model}`);
+  console.log(`Request content: ${content.substring(0, 50)}...`);
+
+  try {
+    const { data } = await axios.post("/api/ai/process", {
+      content,
+      action,
+      modelId: model,
+      context,
+    });
+    console.log("AI response received successfully");
+    return data;
+  } catch (error) {
+    console.error("Error processing AI request:", error);
+    throw error;
+  }
 };

@@ -35,17 +35,21 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
       try {
         setIsLoading(true);
         const modelsList = await getModels();
+        console.log("Models fetched successfully:", modelsList);
         setModels(modelsList);
 
-        // If no model is selected, fetch and set the default model
-        if (!selectedModel && modelsList.length > 0) {
+        // If no model is selected or the selected model isn't in the list, set the default
+        if (!selectedModel || !modelsList.find((m) => m.id === selectedModel)) {
           try {
             const defaultModel = await getDefaultModel();
+            console.log("Default model:", defaultModel);
             onModelChange(defaultModel.id);
           } catch (defaultError) {
-            // If default model fetch fails, use the first model in the list
             console.error("Error fetching default model:", defaultError);
-            onModelChange(modelsList[0].id);
+            // If default model fetch fails, use the first model in the list
+            if (modelsList.length > 0) {
+              onModelChange(modelsList[0].id);
+            }
           }
         }
 
@@ -59,7 +63,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     };
 
     fetchModels();
-  }, [onModelChange]);
+  }, [onModelChange, selectedModel]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -149,6 +153,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
                 role="option"
                 aria-selected={selectedModel === model.id}
                 onClick={() => {
+                  console.log("Selected model:", model.id);
                   onModelChange(model.id);
                   setIsOpen(false);
                 }}
@@ -160,7 +165,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
                   <span className="font-medium">{model.name}</span>
                   <span className="text-xs text-muted-foreground">
                     {model.developer}
-                    {model.contextWindow &&
+                    {model.contextWindow > 0 &&
                       ` · ${model.contextWindow.toLocaleString()} tokens`}
                   </span>
                 </div>

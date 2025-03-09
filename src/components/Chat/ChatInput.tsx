@@ -1,5 +1,7 @@
+// src\components\Chat\ChatInput.tsx
 import React, { useState, useRef, useEffect } from "react";
 import { Send, Paperclip } from "lucide-react";
+import { getModelById } from "@/lib/api";
 
 interface ChatInputProps {
   onSend: (message: string) => void;
@@ -8,6 +10,7 @@ interface ChatInputProps {
   placeholder?: string;
   disabled?: boolean;
   onAttachmentRequest?: () => void;
+  modelData?: any; // Allow passing model data directly
 }
 
 const ChatInput: React.FC<ChatInputProps> = ({
@@ -17,9 +20,43 @@ const ChatInput: React.FC<ChatInputProps> = ({
   placeholder = "Message AI assistant...",
   disabled = false,
   onAttachmentRequest,
+  modelData,
 }) => {
   const [message, setMessage] = useState("");
+  const [displayModelInfo, setDisplayModelInfo] =
+    useState<string>("Loading model...");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Fetch model data if not provided directly
+  useEffect(() => {
+    const fetchModelInfo = async () => {
+      try {
+        if (modelData) {
+          // Use provided model data
+          setDisplayModelInfo(
+            `Using ${modelData.name} (${modelData.developer})`
+          );
+        } else if (selectedModel) {
+          // If we need to fetch model data
+          const modelInfo = await getModelById(selectedModel);
+          if (modelInfo) {
+            setDisplayModelInfo(
+              `Using ${modelInfo.name} (${modelInfo.developer})`
+            );
+          } else {
+            setDisplayModelInfo(`Using ${selectedModel}`);
+          }
+        } else {
+          setDisplayModelInfo("No model selected");
+        }
+      } catch (error) {
+        console.error("Error fetching model info:", error);
+        setDisplayModelInfo(`Using ${selectedModel}`);
+      }
+    };
+
+    fetchModelInfo();
+  }, [selectedModel, modelData]);
 
   // Auto-resize textarea as content changes
   useEffect(() => {
@@ -35,6 +72,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (message.trim() && !isLoading && !disabled) {
+      console.log(`Submitting message with model: ${selectedModel}`);
       onSend(message.trim());
       setMessage("");
 
@@ -43,31 +81,6 @@ const ChatInput: React.FC<ChatInputProps> = ({
         textareaRef.current.style.height = "auto";
       }
     }
-  };
-
-  // Get model display info for footer
-  const getModelDisplayInfo = () => {
-    const modelMap: Record<string, { name: string; developer: string }> = {
-      "mixtral-8x7b-32768": {
-        name: "Mixtral-8x7b-32768",
-        developer: "Mistral",
-      },
-      "llama-3-70b": { name: "Llama 3 70B", developer: "Meta" },
-      "llama-3.1-8b-instant": {
-        name: "Llama 3.1 8B Instant",
-        developer: "Meta",
-      },
-      "gemma-7b": { name: "Gemma 7B", developer: "Google" },
-      "gemma2-9b-it": { name: "Gemma 2 9B", developer: "Google" },
-      "deepseek-coder": { name: "DeepSeek Coder", developer: "DeepSeek" },
-      "deepseek-llm": { name: "DeepSeek Chat", developer: "DeepSeek" },
-    };
-
-
-    const model = modelMap[selectedModel];
-    return model
-      ? `Using ${model.name} (${model.developer})`
-      : `Using ${selectedModel}`;
   };
 
   return (
@@ -129,7 +142,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
       <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
         <div className="flex items-center gap-2">
           <div className="h-4 w-4 bg-primary rounded-full"></div>
-          <span>{getModelDisplayInfo()}</span>
+          <span>{displayModelInfo}</span>
         </div>
         <div>Press ⇧ + ↵ for new line</div>
       </div>

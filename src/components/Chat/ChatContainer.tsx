@@ -1,9 +1,10 @@
+// src\components\Chat\ChatContainer.tsx
 import React, { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import ModelSelector from "./ModelSelector";
-import { processWithAI, getEmails } from "@/lib/api";
+import { processWithAI, getEmails, getDefaultModel } from "@/lib/api";
 import { toast } from "react-hot-toast";
 import { Loader2 } from "lucide-react";
 
@@ -17,7 +18,8 @@ interface Message {
 
 const ChatContainer: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [selectedModel, setSelectedModel] = useState("mixtral-8x7b-32768");
+  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [modelData, setModelData] = useState<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -26,6 +28,25 @@ const ChatContainer: React.FC = () => {
     queryKey: ["emails"],
     queryFn: () => getEmails(),
   });
+
+  // Fetch default model on component mount
+  useEffect(() => {
+    const fetchDefaultModel = async () => {
+      try {
+        const defaultModel = await getDefaultModel();
+        console.log("Setting default model:", defaultModel);
+        setSelectedModel(defaultModel.id);
+        setModelData(defaultModel);
+      } catch (error) {
+        console.error("Error fetching default model:", error);
+        toast.error("Failed to load default AI model");
+      }
+    };
+
+    if (!selectedModel) {
+      fetchDefaultModel();
+    }
+  }, [selectedModel]);
 
   const scrollToBottom = () => {
     if (messagesEndRef.current) {
@@ -40,6 +61,7 @@ const ChatContainer: React.FC = () => {
   const aiMutation = useMutation({
     mutationFn: processWithAI,
     onMutate: (variables) => {
+      console.log("Processing request with model:", variables.model);
       // Show loading state
       setMessages((prev) => [
         ...prev,
@@ -77,6 +99,11 @@ const ChatContainer: React.FC = () => {
   });
 
   const handleSendMessage = (content: string) => {
+    if (!selectedModel) {
+      toast.error("No AI model selected");
+      return;
+    }
+
     const userMessage = {
       id: Date.now().toString(),
       role: "user" as const,
@@ -94,6 +121,11 @@ const ChatContainer: React.FC = () => {
         previousMessages: messages,
       },
     });
+  };
+
+  const handleModelChange = (modelId: string) => {
+    console.log("Model changed to:", modelId);
+    setSelectedModel(modelId);
   };
 
   const handleCopy = (content: string) => {
@@ -170,13 +202,14 @@ const ChatContainer: React.FC = () => {
         <div className="p-4 border-b">
           <ModelSelector
             selectedModel={selectedModel}
-            onModelChange={setSelectedModel}
+            onModelChange={handleModelChange}
           />
         </div>
         <ChatInput
           onSend={handleSendMessage}
           isLoading={aiMutation.isPending}
           selectedModel={selectedModel}
+          modelData={modelData}
         />
       </div>
     </div>
