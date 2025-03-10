@@ -95,7 +95,6 @@ instance.interceptors.response.use(
 
         // Only redirect to login if not already there
         if (!window.location.pathname.includes("/login")) {
-          console.log("Session expired. Redirecting to login page.");
           window.location.href = "/login";
         }
 

@@ -131,24 +131,6 @@ class GmailQueryBuilder {
 
 // Enhanced keyword extraction and classification
 class QueryAnalyzer {
-  private static readonly SECURITY_KEYWORDS = new Set([
-    "security",
-    "alert",
-    "warning",
-    "authentication",
-    "verify",
-    "verification",
-    "suspicious",
-    "unauthorized",
-    "access",
-    "login",
-    "signin",
-    "password",
-    "breach",
-    "protect",
-    "activity",
-  ]);
-
   private static readonly TIME_INDICATORS = new Map([
     ["today", "today"],
     ["yesterday", "yesterday"],
@@ -160,33 +142,55 @@ class QueryAnalyzer {
     ["this year", "year"],
   ]);
 
+  private static readonly FOLDER_INDICATORS: Record<string, string> = {
+    sent: "SENT",
+    draft: "DRAFT",
+    spam: "SPAM",
+    trash: "TRASH",
+    archived: "ARCHIVE",
+    inbox: "INBOX",
+    "all mail": "ALL_MAIL",
+  };
+
   static analyze(content: string) {
     const words = content.toLowerCase().split(/\s+/);
     const result = {
       keywords: [] as string[],
       timeRange: "",
-      isSecurityRelated: false,
-      securityTerms: new Set<string>(),
+      from: "",
+      folder: "INBOX", // Default to inbox
     };
 
-    // Check for time indicators
+    // ✅ Detect if user is searching for SENT emails
+    if (
+      content.toLowerCase().includes("i send") ||
+      content.toLowerCase().includes("i sent")
+    ) {
+      result.folder = "SENT";
+    }
+
+    // ✅ Detect if the user is searching for drafts, spam, trash, etc.
+    for (const phrase in this.FOLDER_INDICATORS) {
+      if (content.toLowerCase().includes(phrase)) {
+        result.folder = this.FOLDER_INDICATORS[phrase];
+        break;
+      }
+    }
+
+    // ✅ Extract keywords (e.g., OTP)
+    words.forEach((word) => {
+      if (!["show", "that", "i", "send", "sent"].includes(word)) {
+        result.keywords.push(word);
+      }
+    });
+
+    // ✅ Detect time-based queries
     for (const [phrase, range] of this.TIME_INDICATORS.entries()) {
       if (content.toLowerCase().includes(phrase)) {
         result.timeRange = range;
         break;
       }
     }
-
-    // Extract security-related terms
-    words.forEach((word) => {
-      if (this.SECURITY_KEYWORDS.has(word)) {
-        result.isSecurityRelated = true;
-        result.securityTerms.add(word);
-      }
-    });
-
-    // Add security terms to keywords
-    result.keywords = [...result.securityTerms];
 
     return result;
   }
@@ -198,32 +202,26 @@ export const getEmails = async (
   try {
     const queryBuilder = new GmailQueryBuilder();
 
-    // If security-related query, add specific filters
-    if (
-      params.query?.toLowerCase().includes("security") ||
-      params.query?.toLowerCase().includes("alert")
-    ) {
-      queryBuilder.addSubject("Security alert");
-      queryBuilder.addKeyword("security OR alert OR warning OR authentication");
-    } else {
-      if (params.query) {
-        queryBuilder.addKeyword(params.query);
-      }
-    }
+    if (params.query) {
+      const analysis = QueryAnalyzer.analyze(params.query);
 
-    // Handle filter labels
-    if (params.filter) {
-      const labelIds = getLabelIdsForFilter(params.filter);
+      // ✅ Add extracted keywords
+      if (analysis.keywords.length > 0) {
+        queryBuilder.addKeyword(analysis.keywords.join(" "));
+      }
+
+      // ✅ Add time-based filter
+      if (analysis.timeRange) {
+        queryBuilder.addTimeRange(analysis.timeRange);
+      }
+
+      // ✅ Get correct Gmail label for folder searches
+      const labelIds = getLabelIdsForFilter(analysis.folder);
       if (labelIds && labelIds.length > 0) {
-        // Add each label to the query
         labelIds.forEach((labelId) => {
           queryBuilder.addKeyword(`label:${labelId}`);
         });
       }
-    }
-
-    if (params.timeRange) {
-      queryBuilder.addTimeRange(params.timeRange);
     }
 
     const searchQuery = queryBuilder.build();
@@ -231,32 +229,15 @@ export const getEmails = async (
     const { data } = await axios.get("/api/emails", {
       params: {
         q: searchQuery,
-        maxResults: 20, // Always fetch 20 emails
-        pageToken: params.pageToken,
+        maxResults: 10, // Limit to avoid excessive API calls
       },
     });
 
-    // Filter security-related emails on the client side if needed
-    let filteredMessages = data.messages;
-    if (
-      params.query?.toLowerCase().includes("security") ||
-      params.query?.toLowerCase().includes("alert")
-    ) {
-      filteredMessages = data.messages.filter((email: any) => {
-        const isSecurityEmail =
-          email.subject.toLowerCase().includes("security") ||
-          email.subject.toLowerCase().includes("alert") ||
-          email.from.toLowerCase().includes("security") ||
-          email.content?.toLowerCase().includes("security alert");
-        return isSecurityEmail;
-      });
-    }
-
     return {
-      messages: filteredMessages,
+      messages: data.messages,
       nextPageToken: data.nextPageToken,
       resultSizeEstimate: data.resultSizeEstimate,
-      totalPages: Math.ceil(data.resultSizeEstimate / 20),
+      totalPages: Math.ceil(data.resultSizeEstimate / 10),
       currentPage: params.page || 1,
     };
   } catch (error) {
@@ -502,19 +483,6 @@ export const processWithAI = async ({
     // Build targeted query
     const queryBuilder = new GmailQueryBuilder();
 
-    // Special handling for security-related queries
-    if (analysis.isSecurityRelated) {
-      queryBuilder.addSubject("Security alert");
-      queryBuilder.addKeyword([...analysis.securityTerms].join(" OR "));
-    } else {
-      // Add analyzed components to query
-      if (analysis.keywords.length > 0) {
-        analysis.keywords.forEach((keyword) =>
-          queryBuilder.addKeyword(keyword)
-        );
-      }
-    }
-
     if (analysis.timeRange) {
       queryBuilder.addTimeRange(analysis.timeRange);
     }
@@ -531,16 +499,6 @@ export const processWithAI = async ({
 
     // Filter security-related emails if needed
     let filteredEmails = relevantEmails.messages;
-    if (analysis.isSecurityRelated) {
-      filteredEmails = relevantEmails.messages.filter((email) => {
-        const isSecurityEmail =
-          email.subject.toLowerCase().includes("security") ||
-          email.subject.toLowerCase().includes("alert") ||
-          email.from.toLowerCase().includes("security") ||
-          email.content?.toLowerCase().includes("security alert");
-        return isSecurityEmail;
-      });
-    }
 
     // Use filtered emails for AI processing
     const emailContext =
@@ -562,9 +520,7 @@ export const processWithAI = async ({
       if (error instanceof AxiosError && error.response?.status === 400) {
         return {
           success: false,
-          response: analysis.isSecurityRelated
-            ? "I found some security-related emails but couldn't process them. Would you like me to list them for you?"
-            : "I couldn't find any relevant emails matching your query. Could you please try rephrasing your request?",
+          response: analysis,
           model: model,
           timestamp: new Date().toISOString(),
         };

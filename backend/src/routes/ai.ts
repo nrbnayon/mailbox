@@ -241,9 +241,6 @@ router.post("/process", auth, async (req: AuthRequest, res: Response) => {
       context,
     } = req.body as AIProcessingRequest;
 
-    console.log("Get emails::", context);
-    console.log("Get content::", query);
-
     // Validate request
     const validationError = validateRequest({
       content: query,

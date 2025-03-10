@@ -34,7 +34,6 @@ const ChatContainer: React.FC = () => {
     const fetchDefaultModel = async () => {
       try {
         const defaultModel = await getDefaultModel();
-        console.log("Setting default model:", defaultModel);
         setSelectedModel(defaultModel.id);
         setModelData(defaultModel);
       } catch (error) {
@@ -63,7 +62,6 @@ const ChatContainer: React.FC = () => {
   const aiMutation = useMutation({
     mutationFn: processWithAI,
     onMutate: (variables) => {
-      console.log("Processing request with model:", variables.model);
       setMessages((prev) => [
         ...prev,
         {

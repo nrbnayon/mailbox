@@ -80,8 +80,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       // Handle specific errors
       if (error?.response?.status === 401) {
-        // Silently handle session expiration
-        console.log("Session expired. Redirecting to login page.");
 
         // Only show toast if user had been previously authenticated
         if (isAuthenticated) {

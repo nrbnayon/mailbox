@@ -39,7 +39,6 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
         if (!selectedModel || !modelsList.find((m) => m.id === selectedModel)) {
           try {
             const defaultModel = await getDefaultModel();
-            console.log("Default model:", defaultModel);
             onModelChange(defaultModel.id);
           } catch (defaultError) {
             console.error("Error fetching default model:", defaultError);

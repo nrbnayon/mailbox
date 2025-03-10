@@ -19,5 +19,3 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
-// Log for debugging
-console.log("API URL:", env.apiUrl);

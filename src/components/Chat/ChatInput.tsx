@@ -70,7 +70,6 @@ const ChatInput: React.FC<ChatInputProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (message.trim() && !isLoading && !disabled) {
-      console.log(`Submitting message with model: ${selectedModel}`);
       onSend(message.trim());
       setMessage("");
 
