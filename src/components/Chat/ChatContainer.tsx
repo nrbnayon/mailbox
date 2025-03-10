@@ -64,7 +64,6 @@ const ChatContainer: React.FC = () => {
     mutationFn: processWithAI,
     onMutate: (variables) => {
       console.log("Processing request with model:", variables.model);
-      // Show loading state
       setMessages((prev) => [
         ...prev,
         {
@@ -140,7 +139,7 @@ const ChatContainer: React.FC = () => {
         action: "process",
         model: selectedModel,
         context: {
-          emails: emails?.messages || [], // Fixed: Use messages array from the EmailsResponse
+          emails: emails?.messages || [], 
           previousMessages: messages.slice(0, messageIndex),
         },
       });

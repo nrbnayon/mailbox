@@ -70,21 +70,51 @@ const getLabelIdsForFilter = (filter?: string): string[] | undefined => {
   return filter ? filterMapping[filter] || ["INBOX"] : undefined;
 };
 
+// export const getEmails = async (
+//   params: GetEmailsParams = {}
+// ): Promise<EmailsResponse> => {
+//   const { data } = await axios.get("/api/emails", {
+//     params: {
+//       ...params,
+//       labelIds: getLabelIdsForFilter(params.filter) || [],
+//       maxResults: params.pageSize || 20,
+//     },
+//   });
+
+//   return {
+//     ...data,
+//     totalPages: Math.ceil(data.resultSizeEstimate / (params.pageSize || 20)),
+//     currentPage: params.page || 1,
+//   };
+// };
+
 export const getEmails = async (
   params: GetEmailsParams = {}
 ): Promise<EmailsResponse> => {
-  const { data } = await axios.get("/api/emails", {
-    params: {
-      ...params,
-      labelIds: getLabelIdsForFilter(params.filter) || [],
-      maxResults: params.pageSize || 20,
-    },
-  });
+  let allEmails: EmailResponse[] = [];
+  let nextPageToken: string | null = null;
+  const pageSize = params.pageSize || 100; // Increased page size
+
+  do {
+    const { data }: { data: EmailsResponse } = await axios.get("/api/emails", {
+      params: {
+        ...params,
+        labelIds: getLabelIdsForFilter(params.filter) || [],
+        maxResults: pageSize,
+        pageToken: nextPageToken,
+      },
+    });
+
+    allEmails = [...allEmails, ...data.messages];
+    nextPageToken = data.nextPageToken;
+  } while (nextPageToken); // Continue fetching while there are more pages
 
   return {
-    ...data,
-    totalPages: Math.ceil(data.resultSizeEstimate / (params.pageSize || 20)),
-    currentPage: params.page || 1,
+    messages: allEmails,
+    nextPageToken: null,
+    resultSizeEstimate: allEmails.length,
+    totalPages: 1, // Since we're returning all emails at once
+    currentPage: 1,
   };
 };
 
@@ -318,6 +348,7 @@ export const processWithAI = async ({
     previousMessages: any[];
   };
 }) => {
+  console.log("AI Processing with emails:", context.emails);
   try {
     const { data } = await axios.post("/api/ai/process", {
       content,

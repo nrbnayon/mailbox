@@ -81,6 +81,7 @@ const getGmailClient = async (userId: string) => {
 };
 
 // Get emails with pagination, filtering, and advanced search
+// Get emails with pagination, filtering, and advanced search
 router.get("/", auth, async (req: AuthRequest, res) => {
   try {
     const gmail = await getGmailClient(req.user!.userId);
@@ -88,7 +89,7 @@ router.get("/", auth, async (req: AuthRequest, res) => {
     // Extract query parameters
     const {
       q = "",
-      maxResults = 50,
+      maxResults = 200,
       pageToken,
       labelIds,
       includeSpamTrash = false,
@@ -138,11 +139,11 @@ router.get("/", auth, async (req: AuthRequest, res) => {
         const bcc = headers.find((h) => h.name === "Bcc")?.value || "";
         const date = headers.find((h) => h.name === "Date")?.value || "";
 
-        // Get attachment info if available
-        const hasAttachments =
-          email.data.payload?.parts?.some(
-            (part) => part.filename && part.filename.length > 0
-          ) || false;
+        // Extract email body (both HTML and plain text)
+        const body = extractEmailBody(email.data.payload);
+
+        // Extract attachments
+        const attachments = extractAttachments(email.data.payload);
 
         return {
           id: message.id,
@@ -154,9 +155,12 @@ router.get("/", auth, async (req: AuthRequest, res) => {
           bcc,
           date,
           preview: email.data.snippet,
+          body,
+          attachments,
           labelIds: email.data.labelIds || [],
           unread: email.data.labelIds?.includes("UNREAD") || false,
-          hasAttachments,
+          starred: email.data.labelIds?.includes("STARRED") || false,
+          labels: email.data.labelIds || [],
           internalDate: email.data.internalDate,
         };
       })
@@ -172,6 +176,89 @@ router.get("/", auth, async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to fetch emails" });
   }
 });
+
+// Helper function to extract email body (both HTML and plain text)
+const extractEmailBody = (
+  payload: gmail_v1.Schema$MessagePart | undefined
+): { html: string; plain: string } => {
+  const body = {
+    html: "",
+    plain: "",
+  };
+
+  if (!payload) return body;
+
+  // Check if the body is in the main part
+  if (payload.body && payload.body.data) {
+    const content = Buffer.from(payload.body.data, "base64").toString("utf-8");
+    if (payload.mimeType === "text/html") {
+      body.html = content;
+    } else if (payload.mimeType === "text/plain") {
+      body.plain = content;
+    }
+  }
+
+  // If the body is in the parts
+  if (payload.parts && payload.parts.length) {
+    for (const part of payload.parts) {
+      if (part.mimeType === "text/html" && part.body && part.body.data) {
+        body.html = Buffer.from(part.body.data, "base64").toString("utf-8");
+      } else if (
+        part.mimeType === "text/plain" &&
+        part.body &&
+        part.body.data
+      ) {
+        body.plain = Buffer.from(part.body.data, "base64").toString("utf-8");
+      } else if (part.parts) {
+        // Recursively check for nested parts
+        const nestedBody = extractEmailBody(part);
+        if (nestedBody.html && !body.html) body.html = nestedBody.html;
+        if (nestedBody.plain && !body.plain) body.plain = nestedBody.plain;
+      }
+    }
+  }
+
+  return body;
+};
+
+// Helper function to extract attachments
+const extractAttachments = (
+  payload: gmail_v1.Schema$MessagePart | undefined
+): Array<{
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+}> => {
+  const attachments: Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+  }> = [];
+
+  if (!payload || !payload.parts) return attachments;
+
+  const processAttachment = (part: gmail_v1.Schema$MessagePart) => {
+    if (part.filename && part.filename.length > 0 && part.body) {
+      attachments.push({
+        id: part.body.attachmentId || "",
+        filename: part.filename,
+        mimeType: part.mimeType || "application/octet-stream",
+        size: parseInt("0", 10),
+      });
+    }
+
+    // Check for nested parts
+    if (part.parts) {
+      part.parts.forEach(processAttachment);
+    }
+  };
+
+  payload.parts.forEach(processAttachment);
+
+  return attachments;
+};
 
 // Get all labels
 router.get("/labels", auth, async (req: AuthRequest, res) => {
