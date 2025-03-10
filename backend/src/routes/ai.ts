@@ -20,7 +20,7 @@ type EmailData = {
   bcc: string;
   date: string;
   preview: string;
-  content?: string;
+  // content?: string;
 };
 
 type MessageData = {
@@ -61,7 +61,7 @@ interface AIResponse {
 
 // Model configuration with fallback chain
 const modelConfig = {
-  primary: "mixtral-8x7b-32768", 
+  primary: "mixtral-8x7b-32768",
   fallbackChain: ["llama3-70b-8192", "llama-3.1-8b-instant", "gemma2-9b-it"],
 } as const;
 
@@ -128,7 +128,7 @@ const processEmailContext = (emails: EmailData[]): ProcessedEmail[] => {
     from: email.from,
     to: email.to,
     date: email.date,
-    content: email.content || email.preview,
+    content: email.preview,
   }));
 };
 
@@ -236,9 +236,13 @@ router.post("/process", auth, async (req: AuthRequest, res: Response) => {
   try {
     const {
       content: query,
+      action,
       modelId = modelConfig.primary,
       context,
     } = req.body as AIProcessingRequest;
+
+    console.log("Get emails::", context);
+    console.log("Get content::", query);
 
     // Validate request
     const validationError = validateRequest({
