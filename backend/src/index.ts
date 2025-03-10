@@ -25,6 +25,9 @@ app.use(
   })
 );
 
+app.get("/", (req, res) => {
+  res.send("Hello developer! How can I help you?");
+});
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/emails", emailRoutes);
