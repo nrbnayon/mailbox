@@ -91,31 +91,40 @@ const getLabelIdsForFilter = (filter?: string): string[] | undefined => {
 export const getEmails = async (
   params: GetEmailsParams = {}
 ): Promise<EmailsResponse> => {
-  let allEmails: EmailResponse[] = [];
-  let nextPageToken: string | null = null;
-  const pageSize = params.pageSize || 100; // Increased page size
+  // Extract query from params or use empty string
+  const searchQuery = params.query || "";
 
-  do {
+  // Build the search query based on the user's request
+  let q = searchQuery;
+
+  // If there's a filter, add it to the query
+  if (params.filter) {
+    const labelIds = getLabelIdsForFilter(params.filter);
+    if (labelIds && labelIds.length > 0) {
+      q = `${q} label:${labelIds.join(" label:")}`.trim();
+    }
+  }
+
+  try {
     const { data }: { data: EmailsResponse } = await axios.get("/api/emails", {
       params: {
-        ...params,
-        labelIds: getLabelIdsForFilter(params.filter) || [],
-        maxResults: pageSize,
-        pageToken: nextPageToken,
+        q,
+        maxResults: 20, // Limit results to most relevant emails
+        pageToken: params.pageToken,
       },
     });
 
-    allEmails = [...allEmails, ...data.messages];
-    nextPageToken = data.nextPageToken;
-  } while (nextPageToken); // Continue fetching while there are more pages
-
-  return {
-    messages: allEmails,
-    nextPageToken: null,
-    resultSizeEstimate: allEmails.length,
-    totalPages: 1, // Since we're returning all emails at once
-    currentPage: 1,
-  };
+    return {
+      messages: data.messages,
+      nextPageToken: data.nextPageToken,
+      resultSizeEstimate: data.resultSizeEstimate,
+      totalPages: Math.ceil(data.resultSizeEstimate / 20),
+      currentPage: params.page || 1,
+    };
+  } catch (error) {
+    console.error("Error fetching emails:", error);
+    throw error;
+  }
 };
 
 export const getEmailById = async (id: string): Promise<EmailResponse> => {
