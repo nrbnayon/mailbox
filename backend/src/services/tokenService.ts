@@ -18,6 +18,17 @@ interface UserDocument extends Document {
   save(): Promise<this>;
 }
 
+// Define interfaces for API responses
+interface MicrosoftTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+}
+
+interface YahooTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+}
+
 /**
  * Refreshes access tokens based on provider type
  * @param userId - The user ID
@@ -96,7 +107,7 @@ const refreshMicrosoftToken = async (
   user: UserDocument
 ): Promise<UserDocument> => {
   try {
-    const response = await axios.post(
+    const response = await axios.post<MicrosoftTokenResponse>(
       "https://login.microsoftonline.com/common/oauth2/v2.0/token",
       new URLSearchParams({
         client_id: process.env.MICROSOFT_CLIENT_ID || "",
@@ -134,7 +145,7 @@ const refreshMicrosoftToken = async (
  */
 const refreshYahooToken = async (user: UserDocument): Promise<UserDocument> => {
   try {
-    const response = await axios.post(
+    const response = await axios.post<YahooTokenResponse>(
       "https://api.login.yahoo.com/oauth2/get_token",
       new URLSearchParams({
         client_id: process.env.YAHOO_CLIENT_ID || "",

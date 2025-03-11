@@ -9,6 +9,29 @@ import { refreshTokenByProvider } from "../services/tokenService.js";
 
 const router = express.Router();
 
+// Define interfaces for API responses
+interface MicrosoftUserResponse {
+  id: string;
+  mail?: string;
+  userPrincipalName: string;
+  displayName: string;
+}
+
+interface MicrosoftTokenResponse {
+  accessToken: string;
+}
+
+interface YahooTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+}
+
+interface YahooUserResponse {
+  sub: string;
+  email: string;
+  name: string;
+}
+
 // Google OAuth configuration
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
@@ -229,7 +252,7 @@ router.get("/microsoft/callback", async (req, res) => {
     });
 
     // Get user info from Microsoft Graph API
-    const userResponse = await axios.get(
+    const userResponse = await axios.get<MicrosoftUserResponse>(
       "https://graph.microsoft.com/v1.0/me",
       {
         headers: { Authorization: `Bearer ${tokenResponse.accessToken}` },
@@ -330,7 +353,7 @@ router.get("/yahoo/callback", async (req, res) => {
     }
 
     // Exchange code for tokens
-    const tokenResponse = await axios.post(
+    const tokenResponse = await axios.post<YahooTokenResponse>(
       "https://api.login.yahoo.com/oauth2/get_token",
       new URLSearchParams({
         grant_type: "authorization_code",
@@ -347,7 +370,7 @@ router.get("/yahoo/callback", async (req, res) => {
     );
 
     // Get user info
-    const userResponse = await axios.get(
+    const userResponse = await axios.get<YahooUserResponse>(
       "https://api.login.yahoo.com/openid/v1/userinfo",
       {
         headers: { Authorization: `Bearer ${tokenResponse.data.access_token}` },
