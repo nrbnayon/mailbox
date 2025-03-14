@@ -30,7 +30,7 @@
     "multer": "^1.4.5-lts.1",
     "openai": "^4.86.2",
     "typescript": "^5.3.3",
-    "zod": "^3.22.4"
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/axios": "^0.9.36",
