@@ -17,10 +17,13 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(
   cors({
-    origin:
-      env.NODE_ENV === "production"
-        ? env.FRONTEND_LIVE_URL || "https://ai-assistant-jade-rho.vercel.app"
-        : env.FRONTEND_URL || "http://localhost:5173",
+    origin: [
+      "https://mailbox-tawny.vercel.app",
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "https://ai-assistant-jade-rho.vercel.app",
+    ],
+
     credentials: true,
   })
 );

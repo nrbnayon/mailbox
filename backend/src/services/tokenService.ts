@@ -15,6 +15,7 @@ interface UserDocument extends Document {
   microsoftAccessToken?: string | null;
   yahooAccessToken?: string | null;
   refreshToken?: string | null;
+  image?: string | null;
   save(): Promise<this>;
 }
 
@@ -51,11 +52,11 @@ export const refreshTokenByProvider = async (
 
   switch (provider) {
     case "gmail":
-      return await refreshGoogleToken(user);
+      return await refreshGoogleToken(user as unknown as UserDocument);
     case "outlook":
-      return await refreshMicrosoftToken(user);
+      return await refreshMicrosoftToken(user as unknown as UserDocument);
     case "yahoo":
-      return await refreshYahooToken(user);
+      return await refreshYahooToken(user as unknown as UserDocument);
     default:
       throw new Error(`Unsupported provider: ${provider}`);
   }
@@ -66,20 +67,34 @@ export const refreshTokenByProvider = async (
  * @param user - The user document
  * @returns The updated user document
  */
-const refreshGoogleToken = async (
-  user: UserDocument
-): Promise<UserDocument> => {
+const refreshGoogleToken = async (user: any): Promise<any> => {
   try {
+    // Check if environment variables are defined
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const redirectUri = process.env.GOOGLE_REDIRECT_URI;
+
+    if (!clientId || !clientSecret) {
+      throw new Error("Google OAuth credentials are not properly configured");
+    }
+
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_REDIRECT_URI
+      clientId,
+      clientSecret,
+      redirectUri
     );
 
+    // Make sure refresh token exists
+    if (!user.refreshToken) {
+      throw new Error("No refresh token available for Google authentication");
+    }
+
+    // Set the refresh token explicitly
     oauth2Client.setCredentials({
       refresh_token: user.refreshToken,
     });
 
+    // Use the token refresh method to get new tokens
     const { credentials } = await oauth2Client.refreshAccessToken();
 
     // Update user with new tokens
