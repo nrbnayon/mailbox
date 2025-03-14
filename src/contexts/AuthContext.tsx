@@ -80,7 +80,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       // Handle specific errors
       if (error?.response?.status === 401) {
-
         // Only show toast if user had been previously authenticated
         if (isAuthenticated) {
           toast.error("Session expired. Please login again.");
@@ -142,14 +141,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       toast.loading("Redirecting to login...");
 
       // Determine scopes based on environment
-      const scopes =
-        process.env.NODE_ENV === "development"
-          ? ["profile", "email"]
-          : [
-              "profile",
-              "email",
-              "https://www.googleapis.com/auth/gmail.modify",
-            ];
+      const scopes = [
+        "profile",
+        "email",
+        "https://www.googleapis.com/auth/gmail.modify",
+      ];
 
       const scopeParam = encodeURIComponent(scopes.join(" "));
 
