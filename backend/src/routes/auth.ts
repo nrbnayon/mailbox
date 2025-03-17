@@ -125,13 +125,13 @@ router.get("/google/callback", async (req, res) => {
 
     // Find or create user
     let user = await User.findOne({ googleId: data.id });
-    
+
     if (!user) {
       // Create new user with explicit provider
       const userData = {
         email: data.email,
         name: data.name,
-        provider: "gmail", 
+        provider: "gmail",
         googleId: data.id,
         googleAccessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
@@ -239,7 +239,15 @@ router.get("/microsoft", async (req, res) => {
   }
 
   const authCodeUrlParameters = {
-    scopes: ["user.read", "mail.read"],
+    scopes: [
+      "user.read",
+      "Mail.Read",
+      "Mail.ReadWrite",
+      "Mail.Send",
+      "User.Read",
+      "offline_access",
+    ],
+    options: { prompt: "select_account" },
     redirectUri: process.env.MICROSOFT_REDIRECT_URI || "",
   };
 
@@ -261,7 +269,14 @@ router.get("/microsoft/callback", async (req, res) => {
   try {
     const tokenResponse = await msalClient.acquireTokenByCode({
       code: code as string,
-      scopes: ["user.read", "mail.read"],
+      scopes: [
+        "user.read",
+        "Mail.Read",
+        "Mail.ReadWrite",
+        "Mail.Send",
+        "User.Read",
+        "offline_access",
+      ],
       redirectUri: process.env.MICROSOFT_REDIRECT_URI || "",
     });
 

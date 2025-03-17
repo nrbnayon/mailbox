@@ -50,15 +50,20 @@ export const refreshTokenByProvider = async (
     throw new Error("No refresh token available for user");
   }
 
-  switch (provider) {
-    case "gmail":
-      return await refreshGoogleToken(user as unknown as UserDocument);
-    case "outlook":
-      return await refreshMicrosoftToken(user as unknown as UserDocument);
-    case "yahoo":
-      return await refreshYahooToken(user as unknown as UserDocument);
-    default:
-      throw new Error(`Unsupported provider: ${provider}`);
+  try {
+    switch (provider) {
+      case "gmail":
+        return await refreshGoogleToken(user as unknown as UserDocument);
+      case "outlook":
+        return await refreshMicrosoftToken(user as unknown as UserDocument);
+      case "yahoo":
+        return await refreshYahooToken(user as unknown as UserDocument);
+      default:
+        throw new Error(`Unsupported provider: ${provider}`);
+    }
+  } catch (error) {
+    console.error(`Error refreshing token for provider ${provider}:`, error);
+    throw error;
   }
 };
 
@@ -69,12 +74,11 @@ export const refreshTokenByProvider = async (
  */
 const refreshGoogleToken = async (user: any): Promise<any> => {
   try {
-    // Check if environment variables are defined
     const clientId = process.env.GOOGLE_CLIENT_ID;
     const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
     const redirectUri = process.env.GOOGLE_REDIRECT_URI;
 
-    if (!clientId || !clientSecret) {
+    if (!clientId || !clientSecret || !redirectUri) {
       throw new Error("Google OAuth credentials are not properly configured");
     }
 
@@ -84,23 +88,17 @@ const refreshGoogleToken = async (user: any): Promise<any> => {
       redirectUri
     );
 
-    // Make sure refresh token exists
     if (!user.refreshToken) {
       throw new Error("No refresh token available for Google authentication");
     }
 
-    // Set the refresh token explicitly
     oauth2Client.setCredentials({
       refresh_token: user.refreshToken,
     });
 
-    // Use the token refresh method to get new tokens
     const { credentials } = await oauth2Client.refreshAccessToken();
 
-    // Update user with new tokens
     user.googleAccessToken = credentials.access_token;
-
-    // If we get a new refresh token, update that too
     if (credentials.refresh_token) {
       user.refreshToken = credentials.refresh_token;
     }
@@ -122,14 +120,23 @@ const refreshMicrosoftToken = async (
   user: UserDocument
 ): Promise<UserDocument> => {
   try {
+    const clientId = process.env.MICROSOFT_CLIENT_ID;
+    const clientSecret = process.env.MICROSOFT_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        "Microsoft OAuth credentials are not properly configured"
+      );
+    }
+
     const response = await axios.post<MicrosoftTokenResponse>(
       "https://login.microsoftonline.com/common/oauth2/v2.0/token",
       new URLSearchParams({
-        client_id: process.env.MICROSOFT_CLIENT_ID || "",
-        client_secret: process.env.MICROSOFT_CLIENT_SECRET || "",
+        client_id: clientId,
+        client_secret: clientSecret,
         refresh_token: user.refreshToken || "",
         grant_type: "refresh_token",
-        scope: "user.read mail.read",
+        scope:
+          "user.read Mail.Read offline_access Mail.Send Mail.ReadWrite User.Read",
       }).toString(),
       {
         headers: {
@@ -139,8 +146,6 @@ const refreshMicrosoftToken = async (
     );
 
     user.microsoftAccessToken = response.data.access_token;
-
-    // Update refresh token if we get a new one
     if (response.data.refresh_token) {
       user.refreshToken = response.data.refresh_token;
     }
@@ -160,11 +165,17 @@ const refreshMicrosoftToken = async (
  */
 const refreshYahooToken = async (user: UserDocument): Promise<UserDocument> => {
   try {
+    const clientId = process.env.YAHOO_CLIENT_ID;
+    const clientSecret = process.env.YAHOO_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error("Yahoo OAuth credentials are not properly configured");
+    }
+
     const response = await axios.post<YahooTokenResponse>(
       "https://api.login.yahoo.com/oauth2/get_token",
       new URLSearchParams({
-        client_id: process.env.YAHOO_CLIENT_ID || "",
-        client_secret: process.env.YAHOO_CLIENT_SECRET || "",
+        client_id: clientId,
+        client_secret: clientSecret,
         refresh_token: user.refreshToken || "",
         grant_type: "refresh_token",
       }).toString(),
@@ -176,8 +187,6 @@ const refreshYahooToken = async (user: UserDocument): Promise<UserDocument> => {
     );
 
     user.yahooAccessToken = response.data.access_token;
-
-    // Update refresh token if we get a new one
     if (response.data.refresh_token) {
       user.refreshToken = response.data.refresh_token;
     }

@@ -61,7 +61,7 @@ const ChatContainer: React.FC = () => {
 
   const aiMutation = useMutation({
     mutationFn: processWithAI,
-    onMutate: (variables) => {
+    onMutate: () => {
       setMessages((prev) => [
         ...prev,
         {

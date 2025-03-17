@@ -1,4 +1,3 @@
-// backend\src\routes\emails.ts
 import express from "express";
 import { google, gmail_v1 } from "googleapis";
 import { auth, AuthRequest } from "../middleware/auth.js";
@@ -7,6 +6,9 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import mime from "mime-types";
+import { Client } from "@microsoft/microsoft-graph-client";
+import "isomorphic-fetch"; // Required for Microsoft Graph API in Node.js
+import { refreshTokenByProvider } from "../services/tokenService.js";
 
 // Set up multer for file uploads
 interface MulterFile extends Express.Multer.File {
@@ -43,47 +45,156 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 const router = express.Router();
 
-// ✅ Fix: Ensure extractBody function is defined BEFORE usage
-const extractBody = (
-  parts: gmail_v1.Schema$MessagePart[] | undefined
-): string => {
-  if (!parts) return "";
+// Define a union type for the email client to handle both Gmail and Outlook cases
+interface GmailClient {
+  provider: "gmail";
+  client: gmail_v1.Gmail;
+  refreshAccessToken?: never; // Explicitly undefined for Gmail
+}
 
-  let body = "";
+interface OutlookClient {
+  provider: "outlook";
+  client: Client;
+  refreshAccessToken: () => Promise<string>;
+}
 
-  parts.forEach((part) => {
-    if (part.mimeType === "text/html" && part.body?.data) {
-      body += Buffer.from(part.body.data, "base64").toString("utf-8");
-    } else if (part.mimeType === "text/plain" && part.body?.data) {
-      body += Buffer.from(part.body.data, "base64").toString("utf-8");
-    } else if (part.parts) {
-      body += extractBody(part.parts); // Recursively extract nested parts
-    }
-  });
+type EmailClient = GmailClient | OutlookClient;
 
-  return body.trim();
-};
-
-// Helper function to initialize Gmail API client
-const getGmailClient = async (userId: string) => {
+// Helper function to initialize email client based on provider
+const getEmailClient = async (userId: string): Promise<EmailClient> => {
   const user = await User.findById(userId);
   if (!user) {
     throw new Error("User not found");
   }
 
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({
-    access_token: user.googleAccessToken,
-    refresh_token: user.refreshToken,
-  });
+  console.log("Provider::", user.provider);
 
-  return google.gmail({ version: "v1", auth: oauth2Client });
+  if (!user.provider) {
+    throw new Error("User provider not specified");
+  }
+
+  // Handle Outlook provider
+  if (user.provider === "outlook") {
+    if (!user.microsoftAccessToken) {
+      throw new Error("No access token available for Microsoft authentication");
+    }
+
+    const graphClient = Client.init({
+      authProvider: async (done) => {
+        try {
+          // Ensure we have the most current access token
+          let currentAccessToken = user.microsoftAccessToken!;
+          if (!currentAccessToken) {
+            const refreshedUser = await refreshTokenByProvider(
+              userId,
+              "outlook"
+            );
+            currentAccessToken = refreshedUser.microsoftAccessToken!;
+          }
+          done(null, currentAccessToken);
+        } catch (error) {
+          done(
+            error instanceof Error ? error : new Error("Authentication failed"),
+            null
+          );
+        }
+      },
+    });
+
+    const refreshAccessToken = async (): Promise<string> => {
+      try {
+        await refreshTokenByProvider(userId, "outlook");
+        const updatedUser = await User.findById(userId);
+        if (!updatedUser) {
+          throw new Error("User not found after token refresh");
+        }
+        if (!updatedUser.microsoftAccessToken) {
+          throw new Error("No access token available after refresh");
+        }
+        return updatedUser.microsoftAccessToken;
+      } catch (error) {
+        console.error("Error refreshing Outlook token:", error);
+        throw error;
+      }
+    };
+
+    return {
+      provider: "outlook",
+      client: graphClient,
+      refreshAccessToken,
+    };
+  }
+  // Handle Gmail provider
+  else if (user.provider === "gmail") {
+    if (!user.googleAccessToken) {
+      throw new Error("No access token available for Google authentication");
+    }
+
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+
+    oauth2Client.setCredentials({
+      access_token: user.googleAccessToken,
+      refresh_token: user.refreshToken || undefined,
+    });
+
+    // Handle automatic token refresh
+    oauth2Client.on("tokens", async (tokens) => {
+      try {
+        if (tokens.access_token) {
+          user.googleAccessToken = tokens.access_token;
+        }
+        if (tokens.refresh_token) {
+          user.refreshToken = tokens.refresh_token;
+        }
+        await user.save();
+      } catch (error) {
+        console.error("Error updating Gmail tokens:", error);
+      }
+    });
+
+    const gmailClient = google.gmail({
+      version: "v1",
+      auth: oauth2Client,
+    });
+
+    return {
+      provider: "gmail",
+      client: gmailClient,
+    };
+  }
+  // Handle unsupported providers
+  else {
+    throw new Error(`Unsupported provider: ${user.provider}`);
+  }
+};
+
+// Extract body for Gmail emails
+const extractBodyGmail = (
+  parts: gmail_v1.Schema$MessagePart[] | undefined
+): string => {
+  if (!parts) return "";
+
+  let body = "";
+  parts.forEach((part: gmail_v1.Schema$MessagePart) => {
+    if (part.mimeType === "text/html" && part.body?.data) {
+      body += Buffer.from(part.body.data, "base64").toString("utf-8");
+    } else if (part.mimeType === "text/plain" && part.body?.data) {
+      body += Buffer.from(part.body.data, "base64").toString("utf-8");
+    } else if (part.parts) {
+      body += extractBodyGmail(part.parts);
+    }
+  });
+  return body.trim();
 };
 
 // Get emails with pagination, filtering, and advanced search
 router.get("/", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
+    let emailClient = await getEmailClient(req.user!.userId);
     const {
       q = "",
       maxResults = 5000,
@@ -92,163 +203,470 @@ router.get("/", auth, async (req: AuthRequest, res) => {
       includeSpamTrash = false,
     } = req.query;
 
-    const params: any = {
-      userId: "me",
-      maxResults: Number(maxResults),
-      q: q as string,
-    };
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const params: any = {
+        userId: "me",
+        maxResults: Number(maxResults),
+        q: q as string,
+      };
 
-    if (pageToken) params.pageToken = pageToken as string;
-    if (labelIds) {
-      params.labelIds = Array.isArray(labelIds) ? labelIds : [labelIds];
-    }
+      if (pageToken) params.pageToken = pageToken as string;
+      if (labelIds) {
+        params.labelIds = Array.isArray(labelIds) ? labelIds : [labelIds];
+      }
+      if (includeSpamTrash) params.includeSpamTrash = Boolean(includeSpamTrash);
 
-    if (includeSpamTrash) params.includeSpamTrash = Boolean(includeSpamTrash);
+      const response = await gmail.users.messages.list(params);
 
-    const response = await gmail.users.messages.list(params);
+      if (!response.data.messages) {
+        return res.json({
+          messages: [],
+          nextPageToken: response.data.nextPageToken || null,
+          resultSizeEstimate: response.data.resultSizeEstimate || 0,
+        });
+      }
 
-    if (!response.data.messages) {
-      return res.json({
-        messages: [],
+      const emails = await Promise.all(
+        response.data.messages.map(async (message) => {
+          const email = await gmail.users.messages.get({
+            userId: "me",
+            id: message.id!,
+            format: "full",
+            metadataHeaders: ["Subject", "From", "To", "Date", "Cc", "Bcc"],
+          });
+
+          const headers = email.data.payload?.headers || [];
+          const subject =
+            headers.find((h) => h.name === "Subject")?.value || "";
+          const from = headers.find((h) => h.name === "From")?.value || "";
+          const to = headers.find((h) => h.name === "To")?.value || "";
+          const cc = headers.find((h) => h.name === "Cc")?.value || "";
+          const bcc = headers.find((h) => h.name === "Bcc")?.value || "";
+          const date = headers.find((h) => h.name === "Date")?.value || "";
+          const hasAttachments =
+            email.data.payload?.parts?.some(
+              (part) => part.filename && part.filename.length > 0
+            ) || false;
+          return {
+            id: message.id,
+            threadId: email.data.threadId,
+            subject,
+            from,
+            to,
+            cc,
+            bcc,
+            date,
+            preview: email.data.snippet,
+            content: email.data.snippet,
+            labelIds: email.data.labelIds || [],
+            unread: email.data.labelIds?.includes("UNREAD") || false,
+            hasAttachments,
+            internalDate: email.data.internalDate,
+          };
+        })
+      );
+
+      res.json({
+        messages: emails,
         nextPageToken: response.data.nextPageToken || null,
         resultSizeEstimate: response.data.resultSizeEstimate || 0,
       });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      let query = graphClient.api("/me/messages").top(Number(maxResults));
+
+      if (q) {
+        query = query.search(`"${q}"`);
+      }
+      if (labelIds) {
+        const categories = Array.isArray(labelIds) ? labelIds : [labelIds];
+        query = query.filter(`categories/any(c:c eq '${categories[0]}')`);
+      }
+      if (pageToken) {
+        query = query.skipToken(pageToken as string);
+      }
+      if (!includeSpamTrash) {
+        query = query.filter(
+          "parentFolderId ne 'JUNKEMAIL' and parentFolderId ne 'DELETEDITEMS'"
+        );
+      }
+
+      let response;
+      try {
+        response = await query
+          .select([
+            "id",
+            "subject",
+            "from",
+            "toRecipients",
+            "ccRecipients",
+            "bccRecipients",
+            "receivedDateTime",
+            "bodyPreview",
+            "isRead",
+            "hasAttachments",
+            "conversationId",
+            "categories",
+          ])
+          .get();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          query = graphClient.api("/me/messages").top(Number(maxResults));
+          if (q) query = query.search(`"${q}"`);
+          if (labelIds) {
+            const categories = Array.isArray(labelIds) ? labelIds : [labelIds];
+            query = query.filter(`categories/any(c:c eq '${categories[0]}')`);
+          }
+          if (pageToken) query = query.skipToken(pageToken as string);
+          if (!includeSpamTrash) {
+            query = query.filter(
+              "parentFolderId ne 'JUNKEMAIL' and parentFolderId ne 'DELETEDITEMS'"
+            );
+          }
+          response = await query
+            .select([
+              "id",
+              "subject",
+              "from",
+              "toRecipients",
+              "ccRecipients",
+              "bccRecipients",
+              "receivedDateTime",
+              "bodyPreview",
+              "isRead",
+              "hasAttachments",
+              "conversationId",
+              "categories",
+            ])
+            .get();
+        } else {
+          throw error;
+        }
+      }
+
+      const emails = response.value.map((email: any) => ({
+        id: email.id,
+        threadId: email.conversationId,
+        subject: email.subject,
+        from: email.from?.emailAddress?.address || "",
+        to:
+          email.toRecipients
+            ?.map((r: any) => r.emailAddress.address)
+            .join(", ") || "",
+        cc:
+          email.ccRecipients
+            ?.map((r: any) => r.emailAddress.address)
+            .join(", ") || "",
+        bcc:
+          email.bccRecipients
+            ?.map((r: any) => r.emailAddress.address)
+            .join(", ") || "",
+        date: email.receivedDateTime,
+        preview: email.bodyPreview,
+        content: email.bodyPreview,
+        labelIds: email.categories || [],
+        unread: !email.isRead,
+        hasAttachments: email.hasAttachments,
+        internalDate: new Date(email.receivedDateTime).getTime().toString(),
+      }));
+
+      res.json({
+        messages: emails,
+        nextPageToken: response["@odata.nextLink"] || null,
+        resultSizeEstimate: response.value.length,
+      });
     }
-
-    const emails = await Promise.all(
-      response.data.messages.map(async (message) => {
-        const email = await gmail.users.messages.get({
-          userId: "me",
-          id: message.id!,
-          format: "full",
-          metadataHeaders: ["Subject", "From", "To", "Date", "Cc", "Bcc"],
-        });
-
-        const headers = email.data.payload?.headers || [];
-        const subject = headers.find((h) => h.name === "Subject")?.value || "";
-        const from = headers.find((h) => h.name === "From")?.value || "";
-        const to = headers.find((h) => h.name === "To")?.value || "";
-        const cc = headers.find((h) => h.name === "Cc")?.value || "";
-        const bcc = headers.find((h) => h.name === "Bcc")?.value || "";
-        const date = headers.find((h) => h.name === "Date")?.value || "";
-        const hasAttachments =
-          email.data.payload?.parts?.some(
-            (part) => part.filename && part.filename.length > 0
-          ) || false;
-        return {
-          id: message.id,
-          threadId: email.data.threadId,
-          subject,
-          from,
-          to,
-          cc,
-          bcc,
-          date,
-          preview: email.data.snippet,
-          content: email.data.snippet,
-          labelIds: email.data.labelIds || [],
-          unread: email.data.labelIds?.includes("UNREAD") || false,
-          hasAttachments,
-          internalDate: email.data.internalDate,
-        };
-      })
-    );
-
-    res.json({
-      messages: emails,
-      nextPageToken: response.data.nextPageToken || null,
-      resultSizeEstimate: response.data.resultSizeEstimate || 0,
-    });
   } catch (error) {
     console.error("Error fetching emails:", error);
     res.status(500).json({ error: "Failed to fetch emails" });
   }
 });
 
-// Get all labels
+// Get all labels (categories for Outlook)
 router.get("/labels", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
-    const response = await gmail.users.labels.list({ userId: "me" });
-    res.json(response.data.labels || []);
+    let emailClient = await getEmailClient(req.user!.userId);
+
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const response = await gmail.users.labels.list({ userId: "me" });
+      res.json(response.data.labels || []);
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      let response;
+      try {
+        response = await graphClient.api("/me/mailFolders").get();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          response = await graphClient.api("/me/mailFolders").get();
+        } else {
+          throw error;
+        }
+      }
+      const labels = response.value.map((folder: any) => ({
+        id: folder.id,
+        name: folder.displayName,
+        type: "user", // Outlook doesn't distinguish system/user labels like Gmail
+      }));
+      res.json(labels);
+    }
   } catch (error) {
     console.error("Error fetching labels:", error);
     res.status(500).json({ error: "Failed to fetch labels" });
   }
 });
 
-// Create a new label
+// Create a new label (category for Outlook)
 router.post("/labels", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
+    let emailClient = await getEmailClient(req.user!.userId);
     const {
       name,
       labelListVisibility = "labelShow",
       messageListVisibility = "show",
     } = req.body;
 
-    const response = await gmail.users.labels.create({
-      userId: "me",
-      requestBody: {
-        name,
-        labelListVisibility,
-        messageListVisibility,
-      },
-    });
-
-    res.json(response.data);
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const response = await gmail.users.labels.create({
+        userId: "me",
+        requestBody: {
+          name,
+          labelListVisibility,
+          messageListVisibility,
+        },
+      });
+      res.json(response.data);
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      let response;
+      try {
+        response = await graphClient.api("/me/mailFolders").post({
+          displayName: name,
+        });
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          response = await graphClient.api("/me/mailFolders").post({
+            displayName: name,
+          });
+        } else {
+          throw error;
+        }
+      }
+      res.json({
+        id: response.id,
+        name: response.displayName,
+        type: "user",
+      });
+    }
   } catch (error) {
     console.error("Error creating label:", error);
     res.status(500).json({ error: "Failed to create label" });
   }
 });
 
-// Update a label
+// Update a label (category for Outlook)
 router.put("/labels/:id", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
+    let emailClient = await getEmailClient(req.user!.userId);
     const { name, labelListVisibility, messageListVisibility } = req.body;
 
-    const response = await gmail.users.labels.update({
-      userId: "me",
-      id: req.params.id,
-      requestBody: {
-        name,
-        labelListVisibility,
-        messageListVisibility,
-      },
-    });
-
-    res.json(response.data);
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const response = await gmail.users.labels.update({
+        userId: "me",
+        id: req.params.id,
+        requestBody: {
+          name,
+          labelListVisibility,
+          messageListVisibility,
+        },
+      });
+      res.json(response.data);
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      let response;
+      try {
+        response = await graphClient
+          .api(`/me/mailFolders/${req.params.id}`)
+          .patch({
+            displayName: name,
+          });
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          response = await graphClient
+            .api(`/me/mailFolders/${req.params.id}`)
+            .patch({
+              displayName: name,
+            });
+        } else {
+          throw error;
+        }
+      }
+      res.json({
+        id: response.id,
+        name: response.displayName,
+        type: "user",
+      });
+    }
   } catch (error) {
     console.error("Error updating label:", error);
     res.status(500).json({ error: "Failed to update label" });
   }
 });
 
-// Delete a label
+// Delete a label (category for Outlook)
 router.delete("/labels/:id", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
-    await gmail.users.labels.delete({ userId: "me", id: req.params.id });
-    res.json({ success: true });
+    let emailClient = await getEmailClient(req.user!.userId);
+
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      await gmail.users.labels.delete({ userId: "me", id: req.params.id });
+      res.json({ success: true });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      try {
+        await graphClient.api(`/me/mailFolders/${req.params.id}`).delete();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          await graphClient.api(`/me/mailFolders/${req.params.id}`).delete();
+        } else {
+          throw error;
+        }
+      }
+      res.json({ success: true });
+    }
   } catch (error) {
     console.error("Error deleting label:", error);
     res.status(500).json({ error: "Failed to delete label" });
   }
 });
 
-// Get full thread
+// Get full thread (conversation for Outlook)
 router.get("/threads/:id", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
-    const thread = await gmail.users.threads.get({
-      userId: "me",
-      id: req.params.id,
-      format: "full",
-    });
+    let emailClient = await getEmailClient(req.user!.userId);
 
-    res.json(thread.data);
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const thread = await gmail.users.threads.get({
+        userId: "me",
+        id: req.params.id,
+        format: "full",
+      });
+      res.json(thread.data);
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      let response;
+      try {
+        response = await graphClient
+          .api("/me/messages")
+          .filter(`conversationId eq '${req.params.id}'`)
+          .select([
+            "id",
+            "subject",
+            "from",
+            "toRecipients",
+            "ccRecipients",
+            "bccRecipients",
+            "receivedDateTime",
+            "body",
+            "isRead",
+            "hasAttachments",
+            "conversationId",
+            "categories",
+          ])
+          .get();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          response = await graphClient
+            .api("/me/messages")
+            .filter(`conversationId eq '${req.params.id}'`)
+            .select([
+              "id",
+              "subject",
+              "from",
+              "toRecipients",
+              "ccRecipients",
+              "bccRecipients",
+              "receivedDateTime",
+              "body",
+              "isRead",
+              "hasAttachments",
+              "conversationId",
+              "categories",
+            ])
+            .get();
+        } else {
+          throw error;
+        }
+      }
+      res.json({
+        id: req.params.id,
+        messages: response.value.map((email: any) => ({
+          id: email.id,
+          threadId: email.conversationId,
+          subject: email.subject,
+          from: email.from?.emailAddress?.address || "",
+          to:
+            email.toRecipients
+              ?.map((r: any) => r.emailAddress.address)
+              .join(", ") || "",
+          cc:
+            email.ccRecipients
+              ?.map((r: any) => r.emailAddress.address)
+              .join(", ") || "",
+          bcc:
+            email.bccRecipients
+              ?.map((r: any) => r.emailAddress.address)
+              .join(", ") || "",
+          date: email.receivedDateTime,
+          content: email.body.content,
+          labelIds: email.categories || [],
+          unread: !email.isRead,
+          hasAttachments: email.hasAttachments,
+          internalDate: new Date(email.receivedDateTime).getTime().toString(),
+        })),
+      });
+    }
   } catch (error) {
     console.error("Error fetching thread:", error);
     res.status(500).json({ error: "Failed to fetch thread" });
@@ -261,41 +679,83 @@ router.get(
   auth,
   async (req: AuthRequest, res) => {
     try {
-      const gmail = await getGmailClient(req.user!.userId);
-
+      let emailClient = await getEmailClient(req.user!.userId);
       const { messageId, attachmentId } = req.params;
       const { filename } = req.query;
 
-      const attachment = await gmail.users.messages.attachments.get({
-        userId: "me",
-        messageId,
-        id: attachmentId,
-      });
+      if (emailClient.provider === "gmail") {
+        const gmail = emailClient.client;
+        const attachment = await gmail.users.messages.attachments.get({
+          userId: "me",
+          messageId,
+          id: attachmentId,
+        });
 
-      if (!attachment.data.data) {
-        return res.status(404).json({ error: "Attachment data not found" });
+        if (!attachment.data.data) {
+          return res.status(404).json({ error: "Attachment data not found" });
+        }
+
+        const base64Data = attachment.data.data
+          .replace(/-/g, "+")
+          .replace(/_/g, "/");
+        const buffer = Buffer.from(base64Data, "base64");
+
+        if (filename) {
+          const mimeType =
+            mime.lookup(filename as string) || "application/octet-stream";
+          res.setHeader("Content-Type", mimeType);
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${filename}"`
+          );
+        } else {
+          res.setHeader("Content-Type", "application/octet-stream");
+        }
+
+        res.send(buffer);
+      } else if (emailClient.provider === "outlook") {
+        let graphClient = emailClient.client;
+        let attachment;
+        try {
+          attachment = await graphClient
+            .api(`/me/messages/${messageId}/attachments/${attachmentId}`)
+            .get();
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            attachment = await graphClient
+              .api(`/me/messages/${messageId}/attachments/${attachmentId}`)
+              .get();
+          } else {
+            throw error;
+          }
+        }
+
+        if (!attachment.contentBytes) {
+          return res.status(404).json({ error: "Attachment data not found" });
+        }
+
+        const buffer = Buffer.from(attachment.contentBytes, "base64");
+
+        if (filename) {
+          const mimeType =
+            mime.lookup(filename as string) || "application/octet-stream";
+          res.setHeader("Content-Type", mimeType);
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${filename}"`
+          );
+        } else {
+          res.setHeader("Content-Type", "application/octet-stream");
+        }
+
+        res.send(buffer);
       }
-
-      // Convert from base64url to base64
-      const base64Data = attachment.data.data
-        .replace(/-/g, "+")
-        .replace(/_/g, "/");
-      const buffer = Buffer.from(base64Data, "base64");
-
-      // Set content type if we have the filename
-      if (filename) {
-        const mimeType =
-          mime.lookup(filename as string) || "application/octet-stream";
-        res.setHeader("Content-Type", mimeType);
-        res.setHeader(
-          "Content-Disposition",
-          `attachment; filename="${filename}"`
-        );
-      } else {
-        res.setHeader("Content-Type", "application/octet-stream");
-      }
-
-      res.send(buffer);
     } catch (error) {
       console.error("Error fetching attachment:", error);
       res.status(500).json({ error: "Failed to fetch attachment" });
@@ -310,121 +770,167 @@ router.post(
   upload.array("attachments"),
   async (req: AuthRequest, res) => {
     try {
-      const gmail = await getGmailClient(req.user!.userId);
-
+      let emailClient = await getEmailClient(req.user!.userId);
       const { to, cc, bcc, subject, message, isHtml = false } = req.body;
       const files = req.files as Express.Multer.File[];
 
-      // Start building email
-      const messageParts = [];
+      if (emailClient.provider === "gmail") {
+        const gmail = emailClient.client;
+        const messageParts = [];
+        messageParts.push(`From: ${req.user!.email}`, `To: ${to}`);
+        if (cc) messageParts.push(`Cc: ${cc}`);
+        if (bcc) messageParts.push(`Bcc: ${bcc}`);
+        messageParts.push(`Subject: ${subject}`, "MIME-Version: 1.0");
 
-      // Add headers
-      messageParts.push(`From: ${req.user!.email}`, `To: ${to}`);
-
-      if (cc) messageParts.push(`Cc: ${cc}`);
-      if (bcc) messageParts.push(`Bcc: ${bcc}`);
-
-      messageParts.push(`Subject: ${subject}`, "MIME-Version: 1.0");
-
-      // Create a boundary for multipart messages
-      const boundary = `boundary_${Date.now().toString(16)}`;
-
-      // If we have attachments or HTML content, create a multipart message
-      if (files.length > 0 || isHtml) {
-        messageParts.push(
-          `Content-Type: multipart/mixed; boundary=${boundary}`
-        );
-        messageParts.push("");
-        messageParts.push(`--${boundary}`);
-
-        // Add the body
-        if (isHtml) {
+        const boundary = `boundary_${Date.now().toString(16)}`;
+        if (files.length > 0 || isHtml) {
           messageParts.push(
-            "Content-Type: multipart/alternative; boundary=alt_boundary"
+            `Content-Type: multipart/mixed; boundary=${boundary}`
           );
           messageParts.push("");
-          messageParts.push("--alt_boundary");
-          messageParts.push("Content-Type: text/plain; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
-          messageParts.push("");
-          // Add plain text version (strip HTML)
-          messageParts.push(message.replace(/<[^>]*>/g, ""));
-          messageParts.push("");
-          messageParts.push("--alt_boundary");
-          messageParts.push("Content-Type: text/html; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
-          messageParts.push("");
-          messageParts.push(message);
-          messageParts.push("");
-          messageParts.push("--alt_boundary--");
+          messageParts.push(`--${boundary}`);
+          if (isHtml) {
+            messageParts.push(
+              "Content-Type: multipart/alternative; boundary=alt_boundary"
+            );
+            messageParts.push("");
+            messageParts.push("--alt_boundary");
+            messageParts.push("Content-Type: text/plain; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(message.replace(/<[^>]*>/g, ""));
+            messageParts.push("");
+            messageParts.push("--alt_boundary");
+            messageParts.push("Content-Type: text/html; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(message);
+            messageParts.push("");
+            messageParts.push("--alt_boundary--");
+          } else {
+            messageParts.push("Content-Type: text/plain; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(message);
+          }
+
+          for (const file of files) {
+            messageParts.push(`--${boundary}`);
+            messageParts.push(
+              `Content-Type: ${file.mimetype || "application/octet-stream"}`
+            );
+            messageParts.push("Content-Transfer-Encoding: base64");
+            messageParts.push(
+              `Content-Disposition: attachment; filename="${file.originalname}"`
+            );
+            messageParts.push("");
+            const fileContent = fs.readFileSync(file.path);
+            const base64Content = fileContent.toString("base64");
+            for (let i = 0; i < base64Content.length; i += 76) {
+              messageParts.push(base64Content.substring(i, i + 76));
+            }
+            messageParts.push("");
+          }
+          messageParts.push(`--${boundary}--`);
         } else {
           messageParts.push("Content-Type: text/plain; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
           messageParts.push("");
           messageParts.push(message);
         }
 
-        // Add attachments
-        for (const file of files) {
-          messageParts.push(`--${boundary}`);
-          messageParts.push(
-            `Content-Type: ${file.mimetype || "application/octet-stream"}`
-          );
-          messageParts.push("Content-Transfer-Encoding: base64");
-          messageParts.push(
-            `Content-Disposition: attachment; filename="${file.originalname}"`
-          );
-          messageParts.push("");
+        const email = messageParts.join("\r\n");
+        const encodedEmail = Buffer.from(email)
+          .toString("base64")
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
 
-          // Read file and convert to base64
-          const fileContent = fs.readFileSync(file.path);
-          const base64Content = fileContent.toString("base64");
+        const response = await gmail.users.messages.send({
+          userId: "me",
+          requestBody: {
+            raw: encodedEmail,
+          },
+        });
 
-          // Split the base64 content into lines of 76 characters
-          for (let i = 0; i < base64Content.length; i += 76) {
-            messageParts.push(base64Content.substring(i, i + 76));
-          }
-          messageParts.push("");
+        if (files.length > 0) {
+          files.forEach((file) => {
+            fs.unlinkSync(file.path);
+          });
         }
 
-        messageParts.push(`--${boundary}--`);
-      } else {
-        // Simple text email
-        messageParts.push("Content-Type: text/plain; charset=UTF-8");
-        messageParts.push("");
-        messageParts.push(message);
-      }
+        res.json({
+          message: "Email sent successfully",
+          id: response.data.id,
+          threadId: response.data.threadId,
+        });
+      } else if (emailClient.provider === "outlook") {
+        let graphClient = emailClient.client;
+        const emailMessage: any = {
+          subject,
+          body: {
+            content: message,
+            contentType: isHtml ? "html" : "text",
+          },
+          toRecipients: to.split(",").map((email: string) => ({
+            emailAddress: { address: email.trim() },
+          })),
+        };
 
-      // Join all parts with proper line breaks
-      const email = messageParts.join("\r\n");
+        if (cc) {
+          emailMessage.ccRecipients = cc.split(",").map((email: string) => ({
+            emailAddress: { address: email.trim() },
+          }));
+        }
+        if (bcc) {
+          emailMessage.bccRecipients = bcc.split(",").map((email: string) => ({
+            emailAddress: { address: email.trim() },
+          }));
+        }
 
-      // Encode the email
-      const encodedEmail = Buffer.from(email)
-        .toString("base64")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/, "");
+        if (files.length > 0) {
+          emailMessage.attachments = files.map((file) => ({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            name: file.originalname,
+            contentType: file.mimetype || "application/octet-stream",
+            contentBytes: fs.readFileSync(file.path).toString("base64"),
+          }));
+        }
 
-      // Send the email
-      const response = await gmail.users.messages.send({
-        userId: "me",
-        requestBody: {
-          raw: encodedEmail,
-        },
-      });
+        let response;
+        try {
+          response = await graphClient.api("/me/sendMail").post({
+            message: emailMessage,
+            saveToSentItems: true,
+          });
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            response = await graphClient.api("/me/sendMail").post({
+              message: emailMessage,
+              saveToSentItems: true,
+            });
+          } else {
+            throw error;
+          }
+        }
 
-      // Clean up temporary files if any
-      if (files.length > 0) {
-        files.forEach((file) => {
-          fs.unlinkSync(file.path);
+        if (files.length > 0) {
+          files.forEach((file) => {
+            fs.unlinkSync(file.path);
+          });
+        }
+
+        res.json({
+          message: "Email sent successfully",
+          id: response.id,
+          threadId: response.conversationId,
         });
       }
-
-      res.json({
-        message: "Email sent successfully",
-        id: response.data.id,
-        threadId: response.data.threadId,
-      });
     } catch (error) {
       console.error("Error sending email:", error);
       res.status(500).json({ error: "Failed to send email" });
@@ -439,148 +945,219 @@ router.post(
   upload.array("attachments"),
   async (req: AuthRequest, res) => {
     try {
-      const gmail = await getGmailClient(req.user!.userId);
-
+      let emailClient = await getEmailClient(req.user!.userId);
       const { message, isHtml = false } = req.body;
       const files = req.files as Express.Multer.File[];
 
-      // Get the original message to extract headers
-      const originalEmail = await gmail.users.messages.get({
-        userId: "me",
-        id: req.params.id,
-        format: "full",
-        metadataHeaders: [
-          "Subject",
-          "From",
-          "To",
-          "Message-ID",
-          "References",
-          "In-Reply-To",
-        ],
-      });
+      if (emailClient.provider === "gmail") {
+        const gmail = emailClient.client;
+        const originalEmail = await gmail.users.messages.get({
+          userId: "me",
+          id: req.params.id,
+          format: "full",
+          metadataHeaders: [
+            "Subject",
+            "From",
+            "To",
+            "Message-ID",
+            "References",
+            "In-Reply-To",
+          ],
+        });
 
-      const headers = originalEmail.data.payload?.headers || [];
-      const subject = headers.find((h) => h.name === "Subject")?.value || "";
-      const from = headers.find((h) => h.name === "From")?.value || "";
-      const to = headers.find((h) => h.name === "To")?.value || "";
-      const messageId =
-        headers.find((h) => h.name === "Message-ID")?.value || "";
-      const references =
-        headers.find((h) => h.name === "References")?.value || "";
+        const headers = originalEmail.data.payload?.headers || [];
+        const subject = headers.find((h) => h.name === "Subject")?.value || "";
+        const from = headers.find((h) => h.name === "From")?.value || "";
+        const to = headers.find((h) => h.name === "To")?.value || "";
+        const messageId =
+          headers.find((h) => h.name === "Message-ID")?.value || "";
+        const references =
+          headers.find((h) => h.name === "References")?.value || "";
 
-      // Start building reply email
-      const messageParts = [];
-
-      // Add headers for reply (swap from/to)
-      messageParts.push(
-        `From: ${req.user!.email}`,
-        `To: ${from}`,
-        `Subject: Re: ${subject.replace(/^Re: /i, "")}`,
-        `In-Reply-To: ${messageId}`,
-        `References: ${references ? `${references} ${messageId}` : messageId}`,
-        "MIME-Version: 1.0"
-      );
-
-      // Create a boundary for multipart messages
-      const boundary = `boundary_${Date.now().toString(16)}`;
-
-      // If we have attachments or HTML content, create a multipart message
-      if (files.length > 0 || isHtml) {
+        const messageParts = [];
         messageParts.push(
-          `Content-Type: multipart/mixed; boundary=${boundary}`
+          `From: ${req.user!.email}`,
+          `To: ${from}`,
+          `Subject: Re: ${subject.replace(/^Re: /i, "")}`,
+          `In-Reply-To: ${messageId}`,
+          `References: ${
+            references ? `${references} ${messageId}` : messageId
+          }`,
+          "MIME-Version: 1.0"
         );
-        messageParts.push("");
-        messageParts.push(`--${boundary}`);
 
-        // Add the body
-        if (isHtml) {
+        const boundary = `boundary_${Date.now().toString(16)}`;
+        if (files.length > 0 || isHtml) {
           messageParts.push(
-            "Content-Type: multipart/alternative; boundary=alt_boundary"
+            `Content-Type: multipart/mixed; boundary=${boundary}`
           );
           messageParts.push("");
-          messageParts.push("--alt_boundary");
-          messageParts.push("Content-Type: text/plain; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
-          messageParts.push("");
-          // Add plain text version (strip HTML)
-          messageParts.push(message.replace(/<[^>]*>/g, ""));
-          messageParts.push("");
-          messageParts.push("--alt_boundary");
-          messageParts.push("Content-Type: text/html; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
-          messageParts.push("");
-          messageParts.push(message);
-          messageParts.push("");
-          messageParts.push("--alt_boundary--");
+          messageParts.push(`--${boundary}`);
+          if (isHtml) {
+            messageParts.push(
+              "Content-Type: multipart/alternative; boundary=alt_boundary"
+            );
+            messageParts.push("");
+            messageParts.push("--alt_boundary");
+            messageParts.push("Content-Type: text/plain; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(message.replace(/<[^>]*>/g, ""));
+            messageParts.push("");
+            messageParts.push("--alt_boundary");
+            messageParts.push("Content-Type: text/html; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(message);
+            messageParts.push("");
+            messageParts.push("--alt_boundary--");
+          } else {
+            messageParts.push("Content-Type: text/plain; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(message);
+          }
+
+          for (const file of files) {
+            messageParts.push(`--${boundary}`);
+            messageParts.push(
+              `Content-Type: ${file.mimetype || "application/octet-stream"}`
+            );
+            messageParts.push("Content-Transfer-Encoding: base64");
+            messageParts.push(
+              `Content-Disposition: attachment; filename="${file.originalname}"`
+            );
+            messageParts.push("");
+            const fileContent = fs.readFileSync(file.path);
+            const base64Content = fileContent.toString("base64");
+            for (let i = 0; i < base64Content.length; i += 76) {
+              messageParts.push(base64Content.substring(i, i + 76));
+            }
+            messageParts.push("");
+          }
+          messageParts.push(`--${boundary}--`);
         } else {
           messageParts.push("Content-Type: text/plain; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
           messageParts.push("");
           messageParts.push(message);
         }
 
-        // Add attachments
-        for (const file of files) {
-          messageParts.push(`--${boundary}`);
-          messageParts.push(
-            `Content-Type: ${file.mimetype || "application/octet-stream"}`
-          );
-          messageParts.push("Content-Transfer-Encoding: base64");
-          messageParts.push(
-            `Content-Disposition: attachment; filename="${file.originalname}"`
-          );
-          messageParts.push("");
+        const email = messageParts.join("\r\n");
+        const encodedEmail = Buffer.from(email)
+          .toString("base64")
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
 
-          // Read file and convert to base64
-          const fileContent = fs.readFileSync(file.path);
-          const base64Content = fileContent.toString("base64");
+        const response = await gmail.users.messages.send({
+          userId: "me",
+          requestBody: {
+            raw: encodedEmail,
+            threadId: originalEmail.data.threadId,
+          },
+        });
 
-          // Split the base64 content into lines of 76 characters
-          for (let i = 0; i < base64Content.length; i += 76) {
-            messageParts.push(base64Content.substring(i, i + 76));
-          }
-          messageParts.push("");
+        if (files.length > 0) {
+          files.forEach((file) => {
+            fs.unlinkSync(file.path);
+          });
         }
 
-        messageParts.push(`--${boundary}--`);
-      } else {
-        // Simple text email
-        messageParts.push("Content-Type: text/plain; charset=UTF-8");
-        messageParts.push("");
-        messageParts.push(message);
-      }
+        res.json({
+          message: "Reply sent successfully",
+          id: response.data.id,
+          threadId: response.data.threadId,
+        });
+      } else if (emailClient.provider === "outlook") {
+        let graphClient = emailClient.client;
+        let originalEmail;
+        try {
+          originalEmail = await graphClient
+            .api(`/me/messages/${req.params.id}`)
+            .get();
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            originalEmail = await graphClient
+              .api(`/me/messages/${req.params.id}`)
+              .get();
+          } else {
+            throw error;
+          }
+        }
 
-      // Join all parts with proper line breaks
-      const email = messageParts.join("\r\n");
+        const emailMessage: any = {
+          subject: `Re: ${originalEmail.subject.replace(/^Re: /i, "")}`,
+          body: {
+            content: message,
+            contentType: isHtml ? "html" : "text",
+          },
+          toRecipients: originalEmail.from.emailAddress.address
+            .split(",")
+            .map((email: string) => ({
+              emailAddress: { address: email.trim() },
+            })),
+          inReplyTo: originalEmail.id,
+          conversationId: originalEmail.conversationId,
+        };
 
-      // Encode the email
-      const encodedEmail = Buffer.from(email)
-        .toString("base64")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/, "");
+        if (originalEmail.ccRecipients) {
+          emailMessage.ccRecipients = originalEmail.ccRecipients.map(
+            (recipient: any) => ({
+              emailAddress: { address: recipient.emailAddress.address },
+            })
+          );
+        }
 
-      // Send the email
-      const response = await gmail.users.messages.send({
-        userId: "me",
-        requestBody: {
-          raw: encodedEmail,
-          threadId: originalEmail.data.threadId,
-        },
-      });
+        if (files.length > 0) {
+          emailMessage.attachments = files.map((file) => ({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            name: file.originalname,
+            contentType: file.mimetype || "application/octet-stream",
+            contentBytes: fs.readFileSync(file.path).toString("base64"),
+          }));
+        }
 
-      // Clean up temporary files if any
-      if (files.length > 0) {
-        files.forEach((file) => {
-          fs.unlinkSync(file.path);
+        let response;
+        try {
+          response = await graphClient.api("/me/sendMail").post({
+            message: emailMessage,
+            saveToSentItems: true,
+          });
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            response = await graphClient.api("/me/sendMail").post({
+              message: emailMessage,
+              saveToSentItems: true,
+            });
+          } else {
+            throw error;
+          }
+        }
+
+        if (files.length > 0) {
+          files.forEach((file) => {
+            fs.unlinkSync(file.path);
+          });
+        }
+
+        res.json({
+          message: "Reply sent successfully",
+          id: response.id,
+          threadId: response.conversationId,
         });
       }
-
-      res.json({
-        message: "Reply sent successfully",
-        id: response.data.id,
-        threadId: response.data.threadId,
-      });
     } catch (error) {
       console.error("Error sending reply:", error);
       res.status(500).json({ error: "Failed to send reply" });
@@ -595,243 +1172,318 @@ router.post(
   upload.array("attachments"),
   async (req: AuthRequest, res) => {
     try {
-      const gmail = await getGmailClient(req.user!.userId);
-
+      let emailClient = await getEmailClient(req.user!.userId);
       const { to, cc, bcc, additionalMessage, isHtml = false } = req.body;
       const additionalFiles = req.files as Express.Multer.File[];
 
-      // Get the original message
-      const originalEmail = await gmail.users.messages.get({
-        userId: "me",
-        id: req.params.id,
-        format: "full",
-      });
+      if (emailClient.provider === "gmail") {
+        const gmail = emailClient.client;
+        const originalEmail = await gmail.users.messages.get({
+          userId: "me",
+          id: req.params.id,
+          format: "full",
+        });
 
-      const headers = originalEmail.data.payload?.headers || [];
-      const subject = headers.find((h) => h.name === "Subject")?.value || "";
+        const headers = originalEmail.data.payload?.headers || [];
+        const subject = headers.find((h) => h.name === "Subject")?.value || "";
 
-      // Start building forwarded email
-      const messageParts = [];
+        const messageParts = [];
+        messageParts.push(`From: ${req.user!.email}`, `To: ${to}`);
+        if (cc) messageParts.push(`Cc: ${cc}`);
+        if (bcc) messageParts.push(`Bcc: ${bcc}`);
+        messageParts.push(
+          `Subject: Fwd: ${subject.replace(/^Fwd: /i, "")}`,
+          "MIME-Version: 1.0"
+        );
 
-      // Add headers
-      messageParts.push(`From: ${req.user!.email}`, `To: ${to}`);
+        const boundary = `boundary_${Date.now().toString(16)}`;
+        messageParts.push(
+          `Content-Type: multipart/mixed; boundary=${boundary}`
+        );
+        messageParts.push("");
+        messageParts.push(`--${boundary}`);
 
-      if (cc) messageParts.push(`Cc: ${cc}`);
-      if (bcc) messageParts.push(`Bcc: ${bcc}`);
+        if (additionalMessage) {
+          if (isHtml) {
+            messageParts.push(
+              "Content-Type: multipart/alternative; boundary=alt_boundary"
+            );
+            messageParts.push("");
+            messageParts.push("--alt_boundary");
+            messageParts.push("Content-Type: text/plain; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(additionalMessage.replace(/<[^>]*>/g, ""));
+            messageParts.push("");
+            messageParts.push("--alt_boundary");
+            messageParts.push("Content-Type: text/html; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(additionalMessage);
+            messageParts.push("");
+            messageParts.push("--alt_boundary--");
+          } else {
+            messageParts.push("Content-Type: text/plain; charset=UTF-8");
+            messageParts.push("Content-Transfer-Encoding: 7bit");
+            messageParts.push("");
+            messageParts.push(additionalMessage);
+            messageParts.push("");
+          }
+          messageParts.push(`--${boundary}`);
+        }
 
-      messageParts.push(
-        `Subject: Fwd: ${subject.replace(/^Fwd: /i, "")}`,
-        "MIME-Version: 1.0"
-      );
+        messageParts.push("Content-Type: message/rfc822");
+        messageParts.push("Content-Disposition: inline");
+        messageParts.push("");
+        headers.forEach((header) => {
+          messageParts.push(`${header.name}: ${header.value}`);
+        });
 
-      // Create a boundary for multipart messages
-      const boundary = `boundary_${Date.now().toString(16)}`;
-      messageParts.push(`Content-Type: multipart/mixed; boundary=${boundary}`);
-      messageParts.push("");
-      messageParts.push(`--${boundary}`);
+        const parts = originalEmail.data.payload?.parts || [];
+        let originalBody = "";
+        if (originalEmail.data.payload?.body?.data) {
+          const buff = Buffer.from(
+            originalEmail.data.payload.body.data,
+            "base64"
+          );
+          originalBody = buff.toString();
+        } else {
+          originalBody = extractBodyGmail(parts);
+        }
 
-      // Add the user's additional message if provided
-      if (additionalMessage) {
-        if (isHtml) {
+        messageParts.push("");
+        messageParts.push(originalBody);
+
+        const getAttachmentsGmail = async (
+          parts: gmail_v1.Schema$MessagePart[],
+          parentId: string = ""
+        ): Promise<{ filename: string; mimeType: string; data: string }[]> => {
+          if (!parts) return [];
+          let attachments: {
+            filename: string;
+            mimeType: string;
+            data: string;
+          }[] = [];
+
+          for (const part of parts) {
+            const { partId, mimeType, filename, body, parts: subParts } = part;
+
+            if (filename && filename.length > 0 && body?.attachmentId) {
+              const attachment = await gmail.users.messages.attachments.get({
+                userId: "me",
+                messageId: originalEmail.data.id!,
+                id: body.attachmentId,
+              });
+
+              attachments.push({
+                filename,
+                mimeType: mimeType || "application/octet-stream",
+                data: attachment.data.data || "",
+              });
+            }
+
+            if (subParts) {
+              const currentPartId = partId || ""; // Handle null or undefined partId
+              const subAttachments = await getAttachmentsGmail(
+                subParts,
+                parentId ? `${parentId}.${currentPartId}` : currentPartId
+              );
+
+              attachments = [...attachments, ...subAttachments];
+            }
+          }
+
+          return attachments;
+        };
+
+        const originalAttachments = await getAttachmentsGmail(parts);
+        for (const attachment of originalAttachments) {
+          messageParts.push(`--${boundary}`);
+          messageParts.push(`Content-Type: ${attachment.mimeType}`);
+          messageParts.push("Content-Transfer-Encoding: base64");
           messageParts.push(
-            "Content-Type: multipart/alternative; boundary=alt_boundary"
+            `Content-Disposition: attachment; filename="${attachment.filename}"`
           );
           messageParts.push("");
-          messageParts.push("--alt_boundary");
-          messageParts.push("Content-Type: text/plain; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
-          messageParts.push("");
-          messageParts.push(additionalMessage.replace(/<[^>]*>/g, ""));
-          messageParts.push("");
-          messageParts.push("--alt_boundary");
-          messageParts.push("Content-Type: text/html; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
-          messageParts.push("");
-          messageParts.push(additionalMessage);
-          messageParts.push("");
-          messageParts.push("--alt_boundary--");
-        } else {
-          messageParts.push("Content-Type: text/plain; charset=UTF-8");
-          messageParts.push("Content-Transfer-Encoding: 7bit");
-          messageParts.push("");
-          messageParts.push(additionalMessage);
+          const base64Content = attachment
+            .data!.replace(/-/g, "+")
+            .replace(/_/g, "/");
+          for (let i = 0; i < base64Content.length; i += 76) {
+            messageParts.push(base64Content.substring(i, i + 76));
+          }
           messageParts.push("");
         }
 
-        messageParts.push(`--${boundary}`);
-      }
-
-      // Add forwarded message headers
-      messageParts.push("Content-Type: message/rfc822");
-      messageParts.push("Content-Disposition: inline");
-      messageParts.push("");
-
-      // Add original headers
-      headers.forEach((header) => {
-        messageParts.push(`${header.name}: ${header.value}`);
-      });
-
-      // Process original message body and attachments
-      const parts = originalEmail.data.payload?.parts || [];
-      let originalBody = "";
-
-      // Function to extract body content
-      const extractBody = (
-        parts: gmail_v1.Schema$MessagePart[] | undefined
-      ): string => {
-        if (!parts) return "";
-
-        let body = "";
-
-        parts.forEach((part) => {
-          if (part.mimeType === "text/html" && part.body?.data) {
-            body += Buffer.from(part.body.data, "base64").toString("utf-8");
-          } else if (part.mimeType === "text/plain" && part.body?.data) {
-            body += Buffer.from(part.body.data, "base64").toString("utf-8");
-          } else if (part.parts) {
-            body += extractBody(part.parts); // Recursively extract nested parts
+        for (const file of additionalFiles) {
+          messageParts.push(`--${boundary}`);
+          messageParts.push(
+            `Content-Type: ${file.mimetype || "application/octet-stream"}`
+          );
+          messageParts.push("Content-Transfer-Encoding: base64");
+          messageParts.push(
+            `Content-Disposition: attachment; filename="${file.originalname}"`
+          );
+          messageParts.push("");
+          const fileContent = fs.readFileSync(file.path);
+          const base64Content = fileContent.toString("base64");
+          for (let i = 0; i < base64Content.length; i += 76) {
+            messageParts.push(base64Content.substring(i, i + 76));
           }
+          messageParts.push("");
+        }
+
+        messageParts.push(`--${boundary}--`);
+        const email = messageParts.join("\r\n");
+        const encodedEmail = Buffer.from(email)
+          .toString("base64")
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
+
+        const response = await gmail.users.messages.send({
+          userId: "me",
+          requestBody: {
+            raw: encodedEmail,
+          },
         });
 
-        return body.trim();
-      };
+        if (additionalFiles.length > 0) {
+          additionalFiles.forEach((file) => {
+            fs.unlinkSync(file.path);
+          });
+        }
 
-      // If body is directly in payload
-      if (originalEmail.data.payload?.body?.data) {
-        const buff = Buffer.from(
-          originalEmail.data.payload.body.data,
-          "base64"
-        );
-        originalBody = buff.toString();
-      } else {
-        originalBody = extractBody(parts);
-      }
-
-      messageParts.push("");
-      messageParts.push(originalBody);
-
-      // Add original attachments
-      const getAttachments = async (
-        parts: any[],
-        parentId: string = ""
-      ): Promise<{ filename: string; mimeType: string; data: string }[]> => {
-        if (!parts) return [];
-
-        let attachments: {
-          filename: string;
-          mimeType: string;
-          data: string;
-        }[] = [];
-
-        for (const part of parts) {
-          const { partId, mimeType, filename, body, parts: subParts } = part;
-
-          if (filename && filename.length > 0 && body.attachmentId) {
-            // Get attachment data
-            const attachment = await gmail.users.messages.attachments.get({
-              userId: "me",
-              messageId: originalEmail.data.id!,
-              id: body.attachmentId,
+        res.json({
+          message: "Email forwarded successfully",
+          id: response.data.id,
+          threadId: response.data.threadId,
+        });
+      } else if (emailClient.provider === "outlook") {
+        let graphClient = emailClient.client;
+        let originalEmail;
+        try {
+          originalEmail = await graphClient
+            .api(`/me/messages/${req.params.id}`)
+            .get();
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
             });
-
-            attachments.push({
-              filename,
-              mimeType,
-              data: attachment.data.data || "",
-            });
-          }
-
-          if (subParts) {
-            const subAttachments = await getAttachments(
-              subParts,
-              parentId ? `${parentId}.${partId}` : partId
-            );
-            attachments = [...attachments, ...subAttachments];
+            originalEmail = await graphClient
+              .api(`/me/messages/${req.params.id}`)
+              .get();
+          } else {
+            throw error;
           }
         }
 
-        return attachments;
-      };
+        const emailMessage: any = {
+          subject: `Fwd: ${originalEmail.subject.replace(/^Fwd: /i, "")}`,
+          body: {
+            content: additionalMessage
+              ? `${additionalMessage}\n\n--- Forwarded Message ---\n${originalEmail.body.content}`
+              : originalEmail.body.content,
+            contentType: isHtml ? "html" : "text",
+          },
+          toRecipients: to.split(",").map((email: string) => ({
+            emailAddress: { address: email.trim() },
+          })),
+        };
 
-      const originalAttachments = await getAttachments(parts);
-
-      // Add original attachments
-      for (const attachment of originalAttachments) {
-        messageParts.push(`--${boundary}`);
-        messageParts.push(`Content-Type: ${attachment.mimeType}`);
-        messageParts.push("Content-Transfer-Encoding: base64");
-        messageParts.push(
-          `Content-Disposition: attachment; filename="${attachment.filename}"`
-        );
-        messageParts.push("");
-
-        // Process base64 data
-        const base64Content = attachment
-          .data!.replace(/-/g, "+")
-          .replace(/_/g, "/");
-
-        // Split the base64 content into lines of 76 characters
-        for (let i = 0; i < base64Content.length; i += 76) {
-          messageParts.push(base64Content.substring(i, i + 76));
+        if (cc) {
+          emailMessage.ccRecipients = cc.split(",").map((email: string) => ({
+            emailAddress: { address: email.trim() },
+          }));
         }
-        messageParts.push("");
-      }
-
-      // Add additional attachments from the request
-      for (const file of additionalFiles) {
-        messageParts.push(`--${boundary}`);
-        messageParts.push(
-          `Content-Type: ${file.mimetype || "application/octet-stream"}`
-        );
-        messageParts.push("Content-Transfer-Encoding: base64");
-        messageParts.push(
-          `Content-Disposition: attachment; filename="${file.originalname}"`
-        );
-        messageParts.push("");
-
-        // Read file and convert to base64
-        const fileContent = fs.readFileSync(file.path);
-        const base64Content = fileContent.toString("base64");
-
-        // Split the base64 content into lines of 76 characters
-        for (let i = 0; i < base64Content.length; i += 76) {
-          messageParts.push(base64Content.substring(i, i + 76));
+        if (bcc) {
+          emailMessage.bccRecipients = bcc.split(",").map((email: string) => ({
+            emailAddress: { address: email.trim() },
+          }));
         }
-        messageParts.push("");
-      }
 
-      messageParts.push(`--${boundary}--`);
+        let originalAttachments;
+        try {
+          originalAttachments = await graphClient
+            .api(`/me/messages/${req.params.id}/attachments`)
+            .get();
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            originalAttachments = await graphClient
+              .api(`/me/messages/${req.params.id}/attachments`)
+              .get();
+          } else {
+            throw error;
+          }
+        }
 
-      // Join all parts with proper line breaks
-      const email = messageParts.join("\r\n");
+        if (originalAttachments.value.length > 0) {
+          emailMessage.attachments = originalAttachments.value.map(
+            (attachment: any) => ({
+              "@odata.type": "#microsoft.graph.fileAttachment",
+              name: attachment.name,
+              contentType: attachment.contentType,
+              contentBytes: attachment.contentBytes,
+            })
+          );
+        }
 
-      // Encode the email
-      const encodedEmail = Buffer.from(email)
-        .toString("base64")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/, "");
+        if (additionalFiles.length > 0) {
+          emailMessage.attachments = emailMessage.attachments || [];
+          emailMessage.attachments.push(
+            ...additionalFiles.map((file) => ({
+              "@odata.type": "#microsoft.graph.fileAttachment",
+              name: file.originalname,
+              contentType: file.mimetype || "application/octet-stream",
+              contentBytes: fs.readFileSync(file.path).toString("base64"),
+            }))
+          );
+        }
 
-      // Send the email
-      const response = await gmail.users.messages.send({
-        userId: "me",
-        requestBody: {
-          raw: encodedEmail,
-        },
-      });
+        let response;
+        try {
+          response = await graphClient.api("/me/sendMail").post({
+            message: emailMessage,
+            saveToSentItems: true,
+          });
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            response = await graphClient.api("/me/sendMail").post({
+              message: emailMessage,
+              saveToSentItems: true,
+            });
+          } else {
+            throw error;
+          }
+        }
 
-      // Clean up temporary files if any
-      if (additionalFiles.length > 0) {
-        additionalFiles.forEach((file) => {
-          fs.unlinkSync(file.path);
+        if (additionalFiles.length > 0) {
+          additionalFiles.forEach((file) => {
+            fs.unlinkSync(file.path);
+          });
+        }
+
+        res.json({
+          message: "Email forwarded successfully",
+          id: response.id,
+          threadId: response.conversationId,
         });
       }
-
-      res.json({
-        message: "Email forwarded successfully",
-        id: response.data.id,
-        threadId: response.data.threadId,
-      });
     } catch (error) {
       console.error("Error forwarding email:", error);
       res.status(500).json({ error: "Failed to forward email" });
@@ -842,12 +1494,38 @@ router.post(
 // Move email to trash
 router.post("/:id/trash", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
-    const response = await gmail.users.messages.trash({
-      userId: "me",
-      id: req.params.id,
-    });
-    res.json({ success: true, message: "Email moved to trash" });
+    let emailClient = await getEmailClient(req.user!.userId);
+
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const response = await gmail.users.messages.trash({
+        userId: "me",
+        id: req.params.id,
+      });
+      res.json({ success: true, message: "Email moved to trash" });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      try {
+        await graphClient.api(`/me/messages/${req.params.id}/move`).post({
+          destinationId: "deleteditems",
+        });
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          await graphClient.api(`/me/messages/${req.params.id}/move`).post({
+            destinationId: "deleteditems",
+          });
+        } else {
+          throw error;
+        }
+      }
+      res.json({ success: true, message: "Email moved to trash" });
+    }
   } catch (error) {
     console.error("Error moving email to trash:", error);
     res.status(500).json({ error: "Failed to move email to trash" });
@@ -857,12 +1535,38 @@ router.post("/:id/trash", auth, async (req: AuthRequest, res) => {
 // Restore email from trash
 router.post("/:id/untrash", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
-    const response = await gmail.users.messages.untrash({
-      userId: "me",
-      id: req.params.id,
-    });
-    res.json({ success: true, message: "Email restored from trash" });
+    let emailClient = await getEmailClient(req.user!.userId);
+
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const response = await gmail.users.messages.untrash({
+        userId: "me",
+        id: req.params.id,
+      });
+      res.json({ success: true, message: "Email restored from trash" });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      try {
+        await graphClient.api(`/me/messages/${req.params.id}/move`).post({
+          destinationId: "inbox",
+        });
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          await graphClient.api(`/me/messages/${req.params.id}/move`).post({
+            destinationId: "inbox",
+          });
+        } else {
+          throw error;
+        }
+      }
+      res.json({ success: true, message: "Email restored from trash" });
+    }
   } catch (error) {
     console.error("Error restoring email from trash:", error);
     res.status(500).json({ error: "Failed to restore email from trash" });
@@ -872,105 +1576,253 @@ router.post("/:id/untrash", auth, async (req: AuthRequest, res) => {
 // Permanently delete email
 router.delete("/:id", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
-    await gmail.users.messages.delete({
-      userId: "me",
-      id: req.params.id,
-    });
-    res.json({ success: true, message: "Email permanently deleted" });
+    let emailClient = await getEmailClient(req.user!.userId);
+
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      await gmail.users.messages.delete({
+        userId: "me",
+        id: req.params.id,
+      });
+      res.json({ success: true, message: "Email permanently deleted" });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      try {
+        await graphClient.api(`/me/messages/${req.params.id}`).delete();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          await graphClient.api(`/me/messages/${req.params.id}`).delete();
+        } else {
+          throw error;
+        }
+      }
+      res.json({ success: true, message: "Email permanently deleted" });
+    }
   } catch (error) {
     console.error("Error deleting email:", error);
     res.status(500).json({ error: "Failed to delete email" });
   }
 });
 
-// ✅ Fix: Get single email with proper extractBody usage
+// Get single email
 router.get("/:id", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
+    let emailClient = await getEmailClient(req.user!.userId);
 
-    const email = await gmail.users.messages.get({
-      userId: "me",
-      id: req.params.id,
-      format: "full",
-    });
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const email = await gmail.users.messages.get({
+        userId: "me",
+        id: req.params.id,
+        format: "full",
+      });
 
-    const headers = email.data.payload?.headers || [];
-    const parts = email.data.payload?.parts || [];
+      const headers = email.data.payload?.headers || [];
+      const parts = email.data.payload?.parts || [];
+      let htmlBody = "";
+      let plainBody = "";
 
-    let htmlBody = "";
-    let plainBody = "";
-
-    // Directly check if email body is present in payload
-    if (email.data.payload?.body?.data) {
-      const buff = Buffer.from(email.data.payload.body.data, "base64");
-      if (email.data.payload.mimeType === "text/html") {
-        htmlBody = buff.toString();
-      } else if (email.data.payload.mimeType === "text/plain") {
-        plainBody = buff.toString();
-      }
-    } else {
-      // Extract body from parts
-      const extractedBody = extractBody(parts);
-      if (extractedBody.includes("<")) {
-        htmlBody = extractedBody;
-      } else {
-        plainBody = extractedBody;
-      }
-    }
-
-    res.json({
-      id: email.data.id,
-      threadId: email.data.threadId,
-      labelIds: email.data.labelIds,
-      snippet: email.data.snippet,
-      internalDate: email.data.internalDate,
-      headers: headers.reduce((acc, header) => {
-        if (header.name && header.value) {
-          (acc as any)[header.name.toLowerCase()] = header.value;
+      if (email.data.payload?.body?.data) {
+        const buff = Buffer.from(email.data.payload.body.data, "base64");
+        if (email.data.payload.mimeType === "text/html") {
+          htmlBody = buff.toString();
+        } else if (email.data.payload.mimeType === "text/plain") {
+          plainBody = buff.toString();
         }
-        return acc;
-      }, {}),
-      body: {
-        html: htmlBody,
-        plain: plainBody,
-      },
-      attachments:
-        email.data.payload?.parts
-          ?.filter((part) => part.filename)
-          ?.map((part) => ({
-            id: part.body?.attachmentId,
-            filename: part.filename,
-            mimeType: part.mimeType,
-            size: part.body?.size,
-          })) || [],
-    });
+      } else {
+        const extractedBody = extractBodyGmail(parts);
+        if (extractedBody.includes("<")) {
+          htmlBody = extractedBody;
+        } else {
+          plainBody = extractedBody;
+        }
+      }
+
+      res.json({
+        id: email.data.id,
+        threadId: email.data.threadId,
+        labelIds: email.data.labelIds,
+        snippet: email.data.snippet,
+        internalDate: email.data.internalDate,
+        headers: headers.reduce((acc, header) => {
+          if (header.name && header.value) {
+            (acc as any)[header.name.toLowerCase()] = header.value;
+          }
+          return acc;
+        }, {}),
+        body: {
+          html: htmlBody,
+          plain: plainBody,
+        },
+        attachments:
+          email.data.payload?.parts
+            ?.filter((part) => part.filename)
+            ?.map((part) => ({
+              id: part.body?.attachmentId,
+              filename: part.filename,
+              mimeType: part.mimeType,
+              size: part.body?.size,
+            })) || [],
+      });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      let email;
+      try {
+        email = await graphClient.api(`/me/messages/${req.params.id}`).get();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          email = await graphClient.api(`/me/messages/${req.params.id}`).get();
+        } else {
+          throw error;
+        }
+      }
+
+      let attachments;
+      try {
+        attachments = await graphClient
+          .api(`/me/messages/${req.params.id}/attachments`)
+          .get();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          attachments = await graphClient
+            .api(`/me/messages/${req.params.id}/attachments`)
+            .get();
+        } else {
+          throw error;
+        }
+      }
+
+      res.json({
+        id: email.id,
+        threadId: email.conversationId,
+        labelIds: email.categories || [],
+        snippet: email.bodyPreview,
+        internalDate: new Date(email.receivedDateTime).getTime().toString(),
+        headers: {
+          subject: email.subject,
+          from: email.from?.emailAddress?.address || "",
+          to:
+            email.toRecipients
+              ?.map((r: any) => r.emailAddress.address)
+              .join(", ") || "",
+          cc:
+            email.ccRecipients
+              ?.map((r: any) => r.emailAddress.address)
+              .join(", ") || "",
+          bcc:
+            email.bccRecipients
+              ?.map((r: any) => r.emailAddress.address)
+              .join(", ") || "",
+          date: email.receivedDateTime,
+        },
+        body: {
+          html: email.body.contentType === "html" ? email.body.content : "",
+          plain: email.body.contentType === "text" ? email.body.content : "",
+        },
+        attachments: attachments.value.map((attachment: any) => ({
+          id: attachment.id,
+          filename: attachment.name,
+          mimeType: attachment.contentType,
+          size: attachment.size,
+        })),
+      });
+    }
   } catch (error) {
     console.error("Error fetching email:", error);
     res.status(500).json({ error: "Failed to fetch email" });
   }
 });
 
-// Modify email labels (add/remove)
+// Modify email labels (add/remove categories for Outlook)
 router.post("/:id/modify", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
+    let emailClient = await getEmailClient(req.user!.userId);
     const { addLabelIds = [], removeLabelIds = [] } = req.body;
 
-    const response = await gmail.users.messages.modify({
-      userId: "me",
-      id: req.params.id,
-      requestBody: {
-        addLabelIds,
-        removeLabelIds,
-      },
-    });
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const response = await gmail.users.messages.modify({
+        userId: "me",
+        id: req.params.id,
+        requestBody: {
+          addLabelIds,
+          removeLabelIds,
+        },
+      });
+      res.json({
+        success: true,
+        message: "Email labels modified",
+        labelIds: response.data.labelIds,
+      });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      let email;
+      try {
+        email = await graphClient.api(`/me/messages/${req.params.id}`).get();
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          email = await graphClient.api(`/me/messages/${req.params.id}`).get();
+        } else {
+          throw error;
+        }
+      }
 
-    res.json({
-      success: true,
-      message: "Email labels modified",
-      labelIds: response.data.labelIds,
-    });
+      let categories = email.categories || [];
+      categories = categories.filter(
+        (cat: string) => !removeLabelIds.includes(cat)
+      );
+      categories = [...new Set([...categories, ...addLabelIds])];
+
+      try {
+        await graphClient.api(`/me/messages/${req.params.id}`).patch({
+          categories,
+        });
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          await graphClient.api(`/me/messages/${req.params.id}`).patch({
+            categories,
+          });
+        } else {
+          throw error;
+        }
+      }
+
+      res.json({
+        success: true,
+        message: "Email labels modified",
+        labelIds: categories,
+      });
+    }
   } catch (error) {
     console.error("Error modifying email labels:", error);
     res.status(500).json({ error: "Failed to modify email labels" });
@@ -980,26 +1832,78 @@ router.post("/:id/modify", auth, async (req: AuthRequest, res) => {
 // Batch modify multiple emails (add/remove labels)
 router.post("/batchModify", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
+    let emailClient = await getEmailClient(req.user!.userId);
     const { ids, addLabelIds = [], removeLabelIds = [] } = req.body;
 
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: "No message IDs provided" });
     }
 
-    const response = await gmail.users.messages.batchModify({
-      userId: "me",
-      requestBody: {
-        ids,
-        addLabelIds,
-        removeLabelIds,
-      },
-    });
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      const response = await gmail.users.messages.batchModify({
+        userId: "me",
+        requestBody: {
+          ids,
+          addLabelIds,
+          removeLabelIds,
+        },
+      });
+      res.json({
+        success: true,
+        message: `Modified labels for ${ids.length} emails`,
+      });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      for (const id of ids) {
+        let email;
+        try {
+          email = await graphClient.api(`/me/messages/${id}`).get();
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            email = await graphClient.api(`/me/messages/${id}`).get();
+          } else {
+            throw error;
+          }
+        }
 
-    res.json({
-      success: true,
-      message: `Modified labels for ${ids.length} emails`,
-    });
+        let categories = email.categories || [];
+        categories = categories.filter(
+          (cat: string) => !removeLabelIds.includes(cat)
+        );
+        categories = [...new Set([...categories, ...addLabelIds])];
+
+        try {
+          await graphClient.api(`/me/messages/${id}`).patch({
+            categories,
+          });
+        } catch (error: any) {
+          if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+            const newAccessToken = await emailClient.refreshAccessToken();
+            graphClient = Client.init({
+              authProvider: async (done) => {
+                done(null, newAccessToken);
+              },
+            });
+            await graphClient.api(`/me/messages/${id}`).patch({
+              categories,
+            });
+          } else {
+            throw error;
+          }
+        }
+      }
+      res.json({
+        success: true,
+        message: `Modified labels for ${ids.length} emails`,
+      });
+    }
   } catch (error) {
     console.error("Error batch modifying emails:", error);
     res.status(500).json({ error: "Failed to batch modify emails" });
@@ -1009,22 +1913,49 @@ router.post("/batchModify", auth, async (req: AuthRequest, res) => {
 // Mark as read/unread
 router.post("/:id/markRead", auth, async (req: AuthRequest, res) => {
   try {
-    const gmail = await getGmailClient(req.user!.userId);
+    let emailClient = await getEmailClient(req.user!.userId);
     const { read = true } = req.body;
 
-    await gmail.users.messages.modify({
-      userId: "me",
-      id: req.params.id,
-      requestBody: {
-        removeLabelIds: read ? ["UNREAD"] : [],
-        addLabelIds: read ? [] : ["UNREAD"],
-      },
-    });
-
-    res.json({
-      success: true,
-      message: `Email marked as ${read ? "read" : "unread"}`,
-    });
+    if (emailClient.provider === "gmail") {
+      const gmail = emailClient.client;
+      await gmail.users.messages.modify({
+        userId: "me",
+        id: req.params.id,
+        requestBody: {
+          removeLabelIds: read ? ["UNREAD"] : [],
+          addLabelIds: read ? [] : ["UNREAD"],
+        },
+      });
+      res.json({
+        success: true,
+        message: `Email marked as ${read ? "read" : "unread"}`,
+      });
+    } else if (emailClient.provider === "outlook") {
+      let graphClient = emailClient.client;
+      try {
+        await graphClient.api(`/me/messages/${req.params.id}`).patch({
+          isRead: read,
+        });
+      } catch (error: any) {
+        if (error.statusCode === 401 && emailClient.refreshAccessToken) {
+          const newAccessToken = await emailClient.refreshAccessToken();
+          graphClient = Client.init({
+            authProvider: async (done) => {
+              done(null, newAccessToken);
+            },
+          });
+          await graphClient.api(`/me/messages/${req.params.id}`).patch({
+            isRead: read,
+          });
+        } else {
+          throw error;
+        }
+      }
+      res.json({
+        success: true,
+        message: `Email marked as ${read ? "read" : "unread"}`,
+      });
+    }
   } catch (error) {
     console.error(
       `Error marking email as ${req.body.read ? "read" : "unread"}:`,

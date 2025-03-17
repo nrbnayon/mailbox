@@ -11,7 +11,7 @@ const userSchema = new mongoose.Schema({
   provider: {
     type: String,
     enum: ["gmail", "outlook", "yahoo"],
-    default: "gmail",
+    default: "outlook",
   },
   googleId: String,
   microsoftId: String,
