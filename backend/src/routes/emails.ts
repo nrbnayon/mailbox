@@ -1,13 +1,15 @@
 import express from "express";
 import { google, gmail_v1 } from "googleapis";
-import { auth, AuthRequest } from "../middleware/auth.js";
-import { User } from "../models/User.js";
+import { Client } from "@microsoft/microsoft-graph-client";
+import "isomorphic-fetch";
+import { auth, AuthRequest } from "../middleware/auth.js"; // Assumed auth middleware
+import { User } from "../models/User.js"; // Assumed User model
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import mime from "mime-types";
-import { Client } from "@microsoft/microsoft-graph-client";
-import "isomorphic-fetch"; // Required for Microsoft Graph API in Node.js
+
+// Token refresh service (assumed external implementation)
 import { refreshTokenByProvider } from "../services/tokenService.js";
 
 // Set up multer for file uploads
@@ -45,11 +47,11 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 const router = express.Router();
 
-// Define a union type for the email client to handle both Gmail and Outlook cases
+// Define email client types for Gmail and Outlook
 interface GmailClient {
   provider: "gmail";
   client: gmail_v1.Gmail;
-  refreshAccessToken?: never; // Explicitly undefined for Gmail
+  refreshAccessToken?: never; // Not needed for Gmail
 }
 
 interface OutlookClient {
@@ -67,13 +69,10 @@ const getEmailClient = async (userId: string): Promise<EmailClient> => {
     throw new Error("User not found");
   }
 
-  console.log("Provider::", user.provider);
-
   if (!user.provider) {
     throw new Error("User provider not specified");
   }
 
-  // Handle Outlook provider
   if (user.provider === "outlook") {
     if (!user.microsoftAccessToken) {
       throw new Error("No access token available for Microsoft authentication");
@@ -82,7 +81,6 @@ const getEmailClient = async (userId: string): Promise<EmailClient> => {
     const graphClient = Client.init({
       authProvider: async (done) => {
         try {
-          // Ensure we have the most current access token
           let currentAccessToken = user.microsoftAccessToken!;
           if (!currentAccessToken) {
             const refreshedUser = await refreshTokenByProvider(
@@ -123,9 +121,7 @@ const getEmailClient = async (userId: string): Promise<EmailClient> => {
       client: graphClient,
       refreshAccessToken,
     };
-  }
-  // Handle Gmail provider
-  else if (user.provider === "gmail") {
+  } else if (user.provider === "gmail") {
     if (!user.googleAccessToken) {
       throw new Error("No access token available for Google authentication");
     }
@@ -141,7 +137,6 @@ const getEmailClient = async (userId: string): Promise<EmailClient> => {
       refresh_token: user.refreshToken || undefined,
     });
 
-    // Handle automatic token refresh
     oauth2Client.on("tokens", async (tokens) => {
       try {
         if (tokens.access_token) {
@@ -165,14 +160,12 @@ const getEmailClient = async (userId: string): Promise<EmailClient> => {
       provider: "gmail",
       client: gmailClient,
     };
-  }
-  // Handle unsupported providers
-  else {
+  } else {
     throw new Error(`Unsupported provider: ${user.provider}`);
   }
 };
 
-// Extract body for Gmail emails
+// Helper function to extract body from Gmail parts
 const extractBodyGmail = (
   parts: gmail_v1.Schema$MessagePart[] | undefined
 ): string => {
@@ -191,7 +184,7 @@ const extractBodyGmail = (
   return body.trim();
 };
 
-// Get emails with pagination, filtering, and advanced search
+// **Route: Fetch Emails**
 router.get("/", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -389,7 +382,7 @@ router.get("/", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Get all labels (categories for Outlook)
+// **Route: Fetch All Labels**
 router.get("/labels", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -419,7 +412,7 @@ router.get("/labels", auth, async (req: AuthRequest, res) => {
       const labels = response.value.map((folder: any) => ({
         id: folder.id,
         name: folder.displayName,
-        type: "user", // Outlook doesn't distinguish system/user labels like Gmail
+        type: "user",
       }));
       res.json(labels);
     }
@@ -429,7 +422,7 @@ router.get("/labels", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Create a new label (category for Outlook)
+// **Route: Create a Label**
 router.post("/labels", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -484,7 +477,7 @@ router.post("/labels", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Update a label (category for Outlook)
+// **Route: Update a Label**
 router.put("/labels/:id", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -540,7 +533,7 @@ router.put("/labels/:id", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Delete a label (category for Outlook)
+// **Route: Delete a Label**
 router.delete("/labels/:id", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -574,7 +567,7 @@ router.delete("/labels/:id", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Get full thread (conversation for Outlook)
+// **Route: Fetch Email Thread**
 router.get("/threads/:id", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -673,7 +666,7 @@ router.get("/threads/:id", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Get email attachment
+// **Route: Fetch Email Attachment**
 router.get(
   "/:messageId/attachments/:attachmentId",
   auth,
@@ -763,7 +756,7 @@ router.get(
   }
 );
 
-// Send email with attachments
+// **Route: Send Email**
 router.post(
   "/",
   auth,
@@ -938,7 +931,7 @@ router.post(
   }
 );
 
-// Reply to an email
+// **Route: Reply to Email**
 router.post(
   "/:id/reply",
   auth,
@@ -1165,7 +1158,7 @@ router.post(
   }
 );
 
-// Forward an email
+// **Route: Forward Email**
 router.post(
   "/:id/forward",
   auth,
@@ -1283,12 +1276,11 @@ router.post(
             }
 
             if (subParts) {
-              const currentPartId = partId || ""; // Handle null or undefined partId
+              const currentPartId = partId || "";
               const subAttachments = await getAttachmentsGmail(
                 subParts,
                 parentId ? `${parentId}.${currentPartId}` : currentPartId
               );
-
               attachments = [...attachments, ...subAttachments];
             }
           }
@@ -1491,14 +1483,14 @@ router.post(
   }
 );
 
-// Move email to trash
+// **Route: Move Email to Trash**
 router.post("/:id/trash", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
 
     if (emailClient.provider === "gmail") {
       const gmail = emailClient.client;
-      const response = await gmail.users.messages.trash({
+      await gmail.users.messages.trash({
         userId: "me",
         id: req.params.id,
       });
@@ -1532,14 +1524,14 @@ router.post("/:id/trash", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Restore email from trash
+// **Route: Restore Email from Trash**
 router.post("/:id/untrash", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
 
     if (emailClient.provider === "gmail") {
       const gmail = emailClient.client;
-      const response = await gmail.users.messages.untrash({
+      await gmail.users.messages.untrash({
         userId: "me",
         id: req.params.id,
       });
@@ -1573,7 +1565,7 @@ router.post("/:id/untrash", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Permanently delete email
+// **Route: Permanently Delete Email**
 router.delete("/:id", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -1610,7 +1602,7 @@ router.delete("/:id", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Get single email
+// **Route: Fetch Single Email**
 router.get("/:id", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -1751,7 +1743,7 @@ router.get("/:id", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Modify email labels (add/remove categories for Outlook)
+// **Route: Modify Email Labels**
 router.post("/:id/modify", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -1829,7 +1821,7 @@ router.post("/:id/modify", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Batch modify multiple emails (add/remove labels)
+// **Route: Batch Modify Emails**
 router.post("/batchModify", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
@@ -1841,7 +1833,7 @@ router.post("/batchModify", auth, async (req: AuthRequest, res) => {
 
     if (emailClient.provider === "gmail") {
       const gmail = emailClient.client;
-      const response = await gmail.users.messages.batchModify({
+      await gmail.users.messages.batchModify({
         userId: "me",
         requestBody: {
           ids,
@@ -1910,7 +1902,7 @@ router.post("/batchModify", auth, async (req: AuthRequest, res) => {
   }
 });
 
-// Mark as read/unread
+// **Route: Mark Email as Read/Unread**
 router.post("/:id/markRead", auth, async (req: AuthRequest, res) => {
   try {
     let emailClient = await getEmailClient(req.user!.userId);
