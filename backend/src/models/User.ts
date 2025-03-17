@@ -1,18 +1,17 @@
-// backend\src\models\User.ts
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
 const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
-    unique: true
+    unique: true,
   },
   name: String,
   image: String,
   provider: {
     type: String,
-    enum: ['gmail', 'outlook', 'yahoo'],
-    required: true
+    enum: ["gmail", "outlook", "yahoo"],
+    default: "gmail",
   },
   googleId: String,
   microsoftId: String,
@@ -23,13 +22,13 @@ const userSchema = new mongoose.Schema({
   refreshToken: String,
   createdAt: {
     type: Date,
-    default: Date.now
+    default: Date.now,
   },
   lastSync: Date,
   isActive: {
     type: Boolean,
-    default: true
-  }
+    default: true,
+  },
 });
 
-export const User = mongoose.model('User', userSchema);
+export const User = mongoose.model("User", userSchema);

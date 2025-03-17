@@ -44,7 +44,7 @@ export const auth = async (
     req.user = {
       userId: decoded.userId,
       email: user.email,
-      provider: user.provider,
+      provider: user.provider ?? undefined,
     };
 
     // If token is close to expiry, refresh it

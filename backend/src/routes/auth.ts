@@ -125,16 +125,30 @@ router.get("/google/callback", async (req, res) => {
 
     // Find or create user
     let user = await User.findOne({ googleId: data.id });
+    
     if (!user) {
-      // Create new user
-      user = await User.create({
+      // Create new user with explicit provider
+      const userData = {
         email: data.email,
         name: data.name,
-        provider: "gmail",
+        provider: "gmail", 
         googleId: data.id,
         googleAccessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
+      };
+
+      console.log("Creating new user:", {
+        ...userData,
+        googleAccessToken: "[REDACTED]",
+        refreshToken: "[REDACTED]",
       });
+
+      try {
+        user = await User.create(userData);
+      } catch (createError) {
+        console.error("User creation error details:", createError);
+        throw createError;
+      }
     } else {
       // Update existing user
       user.googleAccessToken = tokens.access_token;
@@ -261,13 +275,24 @@ router.get("/microsoft/callback", async (req, res) => {
 
     let user = await User.findOne({ microsoftId: userResponse.data.id });
     if (!user) {
-      user = await User.create({
+      // Debug log
+      console.log("Creating new user with provider 'outlook'");
+
+      // Create new user with explicit provider
+      const userData = {
         email: userResponse.data.mail || userResponse.data.userPrincipalName,
         name: userResponse.data.displayName,
         provider: "outlook",
         microsoftId: userResponse.data.id,
         microsoftAccessToken: tokenResponse.accessToken,
+      };
+
+      console.log("User data:", {
+        ...userData,
+        microsoftAccessToken: "[REDACTED]",
       });
+
+      user = await User.create(userData);
     } else {
       user.microsoftAccessToken = tokenResponse.accessToken;
       await user.save();
@@ -379,14 +404,26 @@ router.get("/yahoo/callback", async (req, res) => {
 
     let user = await User.findOne({ yahooId: userResponse.data.sub });
     if (!user) {
-      user = await User.create({
+      // Debug log
+      console.log("Creating new user with provider 'yahoo'");
+
+      // Create new user with explicit provider
+      const userData = {
         email: userResponse.data.email,
         name: userResponse.data.name,
         provider: "yahoo",
         yahooId: userResponse.data.sub,
         yahooAccessToken: tokenResponse.data.access_token,
         refreshToken: tokenResponse.data.refresh_token,
+      };
+
+      console.log("User data:", {
+        ...userData,
+        yahooAccessToken: "[REDACTED]",
+        refreshToken: "[REDACTED]",
       });
+
+      user = await User.create(userData);
     } else {
       user.yahooAccessToken = tokenResponse.data.access_token;
       if (tokenResponse.data.refresh_token) {
@@ -417,7 +454,6 @@ router.get("/yahoo/callback", async (req, res) => {
     res.redirect(`${frontendRedirect}/login?error=yahoo_auth_failed`);
   }
 });
-
 // Get current user
 router.get("/me", auth, async (req: AuthRequest, res) => {
   try {
